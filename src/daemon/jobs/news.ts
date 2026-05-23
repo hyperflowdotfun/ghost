@@ -9,7 +9,7 @@ import { NEWS_FILTER_PROMPT_KEY } from "../../services/preferences.js";
 
 export const newsFetchJob: BackgroundJob = {
   name: "news-fetch",
-  schedule: { type: "interval", ms: 30 * 60 * 1000 },
+  schedule: { type: "interval", ms: 15 * 60 * 1000 },
   kickAtStart: true,
 
   async run({ runtime, logger }: JobContext): Promise<void> {

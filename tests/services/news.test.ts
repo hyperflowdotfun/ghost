@@ -68,10 +68,6 @@ function insertArticle(
     published_at: now,
     fetched_at: now,
     expires_at: now + 86400,
-    // getArticles filters on `summary IS NOT NULL` (the widget
-    // contract is "showed = ready to read"); default fixtures simulate
-    // the post-summarize state. Tests that need the pre-summarize state
-    // should pass `summary: null` explicitly.
     summary: "Test summary",
   };
   const row = { ...defaults, ...overrides };

@@ -97,10 +97,10 @@ try {
       break;
     case "providers":
       await runProviders(positionals.slice(1), values as { models?: string });
-      break;
+      process.exit(0);
     case "skills":
       await runSkills(positionals.slice(1), { config: stringOpt(values.config) });
-      break;
+      process.exit(0);
     case "logs": {
       const { runLogs } = await import("./commands/logs/index.js");
       await runLogs({
@@ -118,7 +118,7 @@ try {
     case "uninstall": {
       const { runUninstallCli } = await import("./commands/uninstall.js");
       await runUninstallCli();
-      break;
+      process.exit(0);
     }
     case "channel": {
       const { runChannelCli } = await import("./commands/channel/index.js");
@@ -126,7 +126,7 @@ try {
         json: Boolean(values.json),
         token: stringOpt(values.token),
       });
-      break;
+      process.exit(0);
     }
     case "proactive": {
       const action = positionals[1] as string | undefined;
@@ -138,12 +138,11 @@ try {
         configPath: stringOpt(values.config),
         logger: rootLogger,
       });
-      break;
+      process.exit(0);
     }
     default:
       printUsage();
       process.exit(command ? 1 : 0);
-      break;
   }
 } catch (err) {
   if (err instanceof ConfigError) {
@@ -153,6 +152,7 @@ try {
   rootLogger.fatal({ err }, "fatal startup error");
   throw err;
 }
+
 
 // ---------------------------------------------------------------------------
 // Commands
