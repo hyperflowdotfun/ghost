@@ -256,3 +256,62 @@ describe("tweetFetchJob — generic error", () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// tweetEvaluateJob — filter toggle
+// ---------------------------------------------------------------------------
+
+import { tweetEvaluateJob } from "../../../src/daemon/jobs/tweets.js";
+
+describe("tweetEvaluateJob — filter toggle", () => {
+  function makeEvalCtx(opts: {
+    filterEnabled: boolean;
+    candidates: Array<{ id: string; content: string; username: string; coins: string[] }>;
+    runnerReturn?: string;
+  }): JobContext {
+    const runnerCall = mock(async () => opts.runnerReturn ?? "[]");
+    const saveEvaluation = mock(() => {});
+    const tweetService = {
+      listPendingEvaluations: mock(() => opts.candidates),
+      saveEvaluation,
+    };
+    const preferenceStore = {
+      getTweetFilterEnabled: mock(() => opts.filterEnabled),
+      getTweetFilterPrompt: mock(() => null),
+    };
+    return {
+      taskAgent: {} as never,
+      runner: { call: runnerCall } as never,
+      runtime: { tweetService, preferenceStore } as never,
+      eventBus: makeEventBus() as never,
+      logger: makeLogger(),
+      kick: mock(async () => {}),
+      lastDelayMs: undefined,
+    };
+  }
+
+  test("filter OFF — admits every candidate without calling the LLM", async () => {
+    const candidates = [
+      { id: "t1", username: "alice", content: "hi", coins: [] },
+      { id: "t2", username: "bob", content: "bye", coins: [] },
+    ];
+    const ctx = makeEvalCtx({ filterEnabled: false, candidates });
+
+    await tweetEvaluateJob.run(ctx);
+
+    const runtime = ctx.runtime as unknown as {
+      tweetService: { saveEvaluation: ReturnType<typeof mock> };
+    };
+    expect(runtime.tweetService.saveEvaluation).toHaveBeenCalledWith(candidates, ["t1", "t2"]);
+    expect((ctx.runner as unknown as { call: ReturnType<typeof mock> }).call).not.toHaveBeenCalled();
+  });
+
+  test("filter ON — runs LLM evaluation as before", async () => {
+    const candidates = [{ id: "t1", username: "alice", content: "hi", coins: [] }];
+    const ctx = makeEvalCtx({ filterEnabled: true, candidates, runnerReturn: '["t1"]' });
+
+    await tweetEvaluateJob.run(ctx);
+
+    expect((ctx.runner as unknown as { call: ReturnType<typeof mock> }).call).toHaveBeenCalledTimes(1);
+  });
+});

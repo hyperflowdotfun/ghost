@@ -27,7 +27,7 @@ describe("/news handler — drain mode (default)", () => {
             sourceId: "coindesk",
             title: "BTC hits new high",
             url: "https://example.com/btc",
-            snippet: "Bitcoin reached a new ATH on heavy spot volume.",
+            description: "Bitcoin reached a new ATH on heavy spot volume.",
             publishedAt: Math.floor(Date.now() / 1000) - 120,
           }),
         ];
@@ -110,33 +110,33 @@ describe("/news handler — drain mode (default)", () => {
     expect(out).toContain("/news latest");
   });
 
-  it("prefers fullSummary over snippet when available", async () => {
+  it("prefers summary over description when available", async () => {
     const out = s(await newsHandler(makeCtx({
       getUnshownArticles: () => [
         makeArticle({
-          fullSummary: "LLM full summary text.",
-          snippet: "raw RSS snippet",
+          summary: "LLM full summary text.",
+          description: "raw RSS description",
           url: "https://x/y",
         }),
       ],
     }), []));
     expect(out).toContain("LLM full summary text.");
-    expect(out).not.toContain("raw RSS snippet");
+    expect(out).not.toContain("raw RSS description");
   });
 
-  it("falls back to snippet when fullSummary is null", async () => {
+  it("falls back to description when summary is null", async () => {
     const out = s(await newsHandler(makeCtx({
       getUnshownArticles: () => [
-        makeArticle({ fullSummary: null, snippet: "raw RSS snippet", url: "https://x/y" }),
+        makeArticle({ summary: null, description: "raw RSS description", url: "https://x/y" }),
       ],
     }), []));
-    expect(out).toContain("raw RSS snippet");
+    expect(out).toContain("raw RSS description");
   });
 
   it("does NOT truncate the summary — LLM has already trimmed it server-side", async () => {
     const longSnippet = "A".repeat(250);
     const out = s(await newsHandler(makeCtx({
-      getUnshownArticles: () => [makeArticle({ snippet: longSnippet, url: "https://x/y" })],
+      getUnshownArticles: () => [makeArticle({ description: longSnippet, url: "https://x/y" })],
     }), []));
     expect(out).toContain(longSnippet);
     expect(out).not.toContain("…");
@@ -147,7 +147,7 @@ describe("/news handler — drain mode (default)", () => {
       getUnshownArticles: () => [
         makeArticle({
           title: "**ETH** rallies",
-          snippet: "**BTC** *rallies* on `news` flow",
+          description: "**BTC** *rallies* on `news` flow",
           url: "https://x/y",
         }),
       ],
@@ -160,8 +160,8 @@ describe("/news handler — drain mode (default)", () => {
   it("numbers articles sequentially", async () => {
     const out = s(await newsHandler(makeCtx({
       getUnshownArticles: () => [
-        makeArticle({ id: "1", title: "First", snippet: "Snippet 1.", url: "https://x/1", sourceId: "src1" }),
-        makeArticle({ id: "2", title: "Second", snippet: "Snippet 2.", url: "https://x/2", sourceId: "src2" }),
+        makeArticle({ id: "1", title: "First", description: "Snippet 1.", url: "https://x/1", sourceId: "src1" }),
+        makeArticle({ id: "2", title: "Second", description: "Snippet 2.", url: "https://x/2", sourceId: "src2" }),
       ],
     }), []));
     expect(out).toContain("1. ");

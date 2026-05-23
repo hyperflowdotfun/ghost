@@ -1,6 +1,7 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { readLogTail } from "../../../src/commands/logs/tail.js";
-import { writeFileSync, mkdtempSync, rmSync } from "node:fs";
+import { findActiveLogFile } from "../../../src/services/os/utils.js";
+import { writeFileSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -154,5 +155,126 @@ describe("log-tail-reader", () => {
     const result = await readLogTail({ file: logFile });
     // Default limit is 200, so should return at most 200 lines
     expect(result.lines.length).toBeLessThanOrEqual(200);
+  });
+
+  // Rotation test updated for pino-roll daily semantics:
+  // pino-roll creates a NEW file (ghost.YYYY-MM-DD.2.log) on size rotation —
+  // the old file stays and the new file is smaller. The follow loop in
+  // index.ts detects the filename change and resets cursor. Within a single
+  // file the existing cursor > size detection still works (e.g. if a file is
+  // truncated externally, which is an edge case).
+  test("reset=true when cursor exceeds current file size (shrink/truncation edge case)", async () => {
+    // Write a substantial block and capture cursor.
+    writeLog(Array(10).fill("x".repeat(40)));
+    const first = await readLogTail({ file: logFile });
+    const cursorAfterFirst = first.cursor;
+    expect(cursorAfterFirst).toBeGreaterThan(0);
+
+    // Overwrite with a smaller file (simulates a file being truncated or
+    // re-opened fresh at a smaller size — cursor now exceeds file size).
+    writeLog(["a", "b"]);
+    expect(statSync(logFile).size).toBeLessThan(cursorAfterFirst);
+
+    // Poll with the stale cursor — must detect file shrank → reset=true.
+    const second = await readLogTail({ file: logFile, cursor: cursorAfterFirst });
+    expect(second.reset).toBe(true);
+
+    // Follow-up poll at the new EOF — no new lines pending.
+    const third = await readLogTail({ file: logFile, cursor: second.cursor });
+    expect(third.reset).toBe(false);
+    expect(third.lines).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// findActiveLogFile tests
+// ---------------------------------------------------------------------------
+
+describe("findActiveLogFile", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "ghost-activelog-test-"));
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  function touch(name: string): void {
+    writeFileSync(join(tmpDir, name), "x", "utf8");
+  }
+
+  test("returns null when directory is empty", () => {
+    expect(findActiveLogFile(tmpDir)).toBeNull();
+  });
+
+  test("returns null when directory does not exist", () => {
+    expect(findActiveLogFile(join(tmpDir, "nonexistent"))).toBeNull();
+  });
+
+  test("returns null when no files match the pattern", () => {
+    touch("ghost.log");
+    touch("ghost.log.1");
+    touch("other.txt");
+    expect(findActiveLogFile(tmpDir)).toBeNull();
+  });
+
+  test("returns the single matching file", () => {
+    touch("ghost.2026-05-21.1.log");
+    const result = findActiveLogFile(tmpDir);
+    expect(result).toBe(join(tmpDir, "ghost.2026-05-21.1.log"));
+  });
+
+  test("picks highest number within same date", () => {
+    touch("ghost.2026-05-21.1.log");
+    touch("ghost.2026-05-21.2.log");
+    touch("ghost.2026-05-21.3.log");
+    const result = findActiveLogFile(tmpDir);
+    expect(result).toBe(join(tmpDir, "ghost.2026-05-21.3.log"));
+  });
+
+  test("picks newest date over earlier date regardless of number", () => {
+    touch("ghost.2026-05-20.5.log"); // older date, higher number
+    touch("ghost.2026-05-21.1.log"); // newer date, lower number
+    const result = findActiveLogFile(tmpDir);
+    expect(result).toBe(join(tmpDir, "ghost.2026-05-21.1.log"));
+  });
+
+  test("ignores files that do not match the pattern", () => {
+    touch("ghost.2026-05-21.1.log");
+    touch("ghost.log");            // legacy bare file — ignored
+    touch("random-other.log");     // unrelated file — ignored
+    touch("ghost.2026-05-21.log"); // missing number segment — ignored
+    const result = findActiveLogFile(tmpDir);
+    expect(result).toBe(join(tmpDir, "ghost.2026-05-21.1.log"));
+  });
+
+  test("file-changes-between-polls: cursor resets when active file changes", async () => {
+    // Simulate the follow-loop scenario: write to file A, get cursor, then
+    // a newer file B appears (midnight roll or size cap), verify B is resolved.
+    const fileA = join(tmpDir, "ghost.2026-05-21.1.log");
+    const fileB = join(tmpDir, "ghost.2026-05-22.1.log");
+
+    writeFileSync(fileA, "line1\nline2\n", "utf8");
+
+    // First poll resolves file A.
+    const resolved1 = findActiveLogFile(tmpDir);
+    expect(resolved1).toBe(fileA);
+
+    const first = await readLogTail({ file: fileA });
+    const cursorAfterA = first.cursor;
+    expect(cursorAfterA).toBeGreaterThan(0);
+
+    // New day: file B appears.
+    writeFileSync(fileB, "line3\nline4\n", "utf8");
+
+    // Second poll resolves file B (newer date wins).
+    const resolved2 = findActiveLogFile(tmpDir);
+    expect(resolved2).toBe(fileB);
+
+    // Since the filename changed, the follow loop resets cursor to 0 and reads B.
+    const second = await readLogTail({ file: fileB, cursor: 0 });
+    expect(second.lines).toEqual(["line3", "line4"]);
   });
 });

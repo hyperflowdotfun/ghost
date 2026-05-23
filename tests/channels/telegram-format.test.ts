@@ -586,16 +586,65 @@ describe("extractCharts — tag extraction helper", () => {
     expect(charts[0]).toMatchObject({ symbol: "ETH", interval: "1h" });
   });
 
-  test("optional indicators and levels are captured", () => {
+  test("optional indicators and levels are captured; ema is dropped as base layer", () => {
     const { charts } = extractCharts(
       '<chart symbol="BTC" interval="4h" indicators="ema,rsi" levels="70000,65000" />',
     );
     expect(charts[0]).toMatchObject({
       symbol: "BTC",
       interval: "4h",
-      indicators: "ema,rsi",
+      indicators: "rsi",
       levels: "70000,65000",
     });
+  });
+
+  test("indicator normalization: display names mapped to canonical codes, unknowns dropped", () => {
+    const { charts } = extractCharts(
+      '<chart symbol="BTC" interval="4h" indicators="EMA9, RSI, MACD, Bollinger Bands, GIBBERISH" />',
+    );
+    expect(charts[0]?.indicators).toBe("rsi,macd,bb");
+  });
+
+  test("levels normalization: non-numeric tokens are dropped", () => {
+    const { charts } = extractCharts(
+      '<chart symbol="BTC" interval="4h" levels="support, 65000, resistance, 68500" />',
+    );
+    expect(charts[0]?.levels).toBe("65000,68500");
+  });
+
+  test("levels normalization: all non-numeric -> levels omitted", () => {
+    const { charts } = extractCharts(
+      '<chart symbol="BTC" interval="4h" levels="support, resistance" />',
+    );
+    expect(charts[0]?.levels).toBeUndefined();
+  });
+
+  test("body-style fallback: <chart>\\nsymbol: BTC\\n…</chart> is parsed", () => {
+    const { charts } = extractCharts(
+      '<chart>\nsymbol: BTC\ninterval: 4h\nindicators: RSI, MACD\nlevels: 65000, 68500\n</chart>',
+    );
+    expect(charts[0]).toMatchObject({
+      symbol: "BTC",
+      interval: "4h",
+      indicators: "rsi,macd",
+      levels: "65000,68500",
+    });
+  });
+
+  test("body-style fallback: full LLM drift output (display names + word levels) still extracts what it can", () => {
+    const { charts } = extractCharts(
+      '<chart>\nsymbol: BTC\ninterval: 4h\nindicators: EMA9, EMA21, EMA50, EMA200, RSI, MACD, Bollinger\nlevels: support, resistance\n</chart>',
+    );
+    expect(charts).toHaveLength(1);
+    expect(charts[0]).toMatchObject({ symbol: "BTC", interval: "4h", indicators: "rsi,macd,bb" });
+    expect(charts[0]?.levels).toBeUndefined();
+  });
+
+  test("attribute form wins over body when both present", () => {
+    const { charts } = extractCharts(
+      '<chart symbol="ETH" interval="1h">\nsymbol: BTC\ninterval: 4h\n</chart>',
+    );
+    expect(charts[0]).toMatchObject({ symbol: "ETH", interval: "1h" });
   });
 
   test("multiple self-closing tags return specs in order", () => {

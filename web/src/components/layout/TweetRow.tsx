@@ -9,7 +9,6 @@ import {
   timeAgo,
   tokenizeContent,
 } from './tweet-utils';
-import { Avatar } from '@/components/ui';
 
 type EngagementKind = 'reply' | 'retweet' | 'heart' | 'views';
 
@@ -133,14 +132,30 @@ export function TweetRow({
     ? (displayName || `@${t.username}`)
     : null;
 
+  const openOriginal = () => {
+    if (t.url) window.open(t.url, '_blank', 'noopener,noreferrer');
+  };
+
   return (
     <div
-      className="relative px-4 py-3 border-b border-[rgba(32,36,54,0.6)] transition-colors duration-fast ease-out hover:bg-white/[0.02]"
+      role={t.url ? 'link' : undefined}
+      tabIndex={t.url ? 0 : -1}
+      onClick={t.url ? openOriginal : undefined}
+      onKeyDown={(e) => {
+        if (!t.url) return;
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          openOriginal();
+        }
+      }}
+      className={
+        'relative px-4 py-3 border-b border-[rgba(32,36,54,0.6)] transition-colors duration-fast ease-out hover:bg-white/[0.02] '
+        + (t.url ? 'cursor-pointer focus-visible:bg-white/[0.03] focus-visible:outline-none' : '')
+      }
       style={{ backgroundImage: 'linear-gradient(180deg, rgba(1,1,1,0) 21.552%, var(--color-surface-canvas, #0a0a0b) 88.233%)' }}
     >
       {retweetLabel && <RetweetChip label={retweetLabel} />}
       <div className="flex items-center gap-2 mb-1.5">
-        <Avatar url={t.avatarUrl} seed={t.username} label={displayName} size={28} />
         <div className="flex flex-col min-w-0 flex-1">
           <span
             className="text-body-sm-medium text-[var(--color-text-primary)] leading-[1.2] whitespace-nowrap overflow-hidden text-ellipsis"
@@ -177,7 +192,7 @@ export function TweetRow({
       {isLong && (
         <button
           className="bg-transparent border-none p-0 mt-1 text-footnote text-[#00b8ff] cursor-pointer transition-colors duration-fast ease-out hover:text-[var(--color-brand-hover)] focus-visible:text-[var(--color-brand-hover)]"
-          onClick={() => onToggleExpand(t.id)}
+          onClick={(e) => { e.stopPropagation(); onToggleExpand(t.id); }}
         >{isExpanded ? 'Read less' : 'Read more'}</button>
       )}
       {t.coins.length > 0 && (

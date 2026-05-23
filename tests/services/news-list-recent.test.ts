@@ -8,6 +8,7 @@ import { NewsService } from "../../src/services/news.js";
 import { WatchlistService } from "../../src/services/watchlist.js";
 import { NOOP_LOGGER } from "../../src/logger.js";
 import { initDatabase } from "../../src/core/database.js";
+import { DB_MIGRATIONS } from "../../src/core/migrations/registry.js";
 
 /**
  * Tests for NewsService.listRecentRelevant — the read path the observer's
@@ -15,13 +16,14 @@ import { initDatabase } from "../../src/core/database.js";
  *
  * Contract:
  *   - ai_relevant = 1
- *   - full_summary IS NOT NULL
  *   - ai_duplicate_of IS NULL
  *   - dismissed_at IS NULL
  *   - expires_at > unixepoch()
  *   - published_at > sinceTs (strict)
  *   - ordered by published_at DESC, id DESC
  *   - bounded by limit
+ *   (no gate on `summary` — on-demand summarization means relevant rows
+ *    should reach the observer detector immediately)
  */
 
 let dir: string;
@@ -32,6 +34,7 @@ beforeEach(() => {
   dir = join(tmpdir(), `ghost-test-news-list-recent-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   mkdirSync(dir, { recursive: true });
   db = initDatabase(join(dir, "test.db"));
+  for (const m of DB_MIGRATIONS) m.up(db);
   // WatchlistService is a required dep but listRecentRelevant doesn't touch it.
   const watchlist = new WatchlistService(db);
   service = new NewsService(db, watchlist, undefined, NOOP_LOGGER);
@@ -46,7 +49,7 @@ interface InsertOptions {
   id?: string;
   publishedAt?: number;          // unix seconds
   expiresInSec?: number;         // expires_at = now + this
-  fullSummary?: string | null;
+  summary?: string | null;
   aiRelevant?: 0 | 1 | null;
   aiDuplicateOf?: string | null;
   dismissedAt?: number | null;
@@ -61,8 +64,8 @@ function insert(opts: InsertOptions = {}): string {
   const expiresAt = now + (opts.expiresInSec ?? 86_400);
   const stmt = db.prepare(`
     INSERT INTO articles
-      (id, source_id, external_id, url, title, snippet, image_url, coins,
-       importance, published_at, fetched_at, expires_at, full_summary,
+      (id, source_id, external_id, url, title, description, image_url, coins,
+       importance, published_at, fetched_at, expires_at, summary,
        ai_relevant, ai_duplicate_of, dismissed_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
@@ -72,14 +75,14 @@ function insert(opts: InsertOptions = {}): string {
     `ext-${id}`,
     `https://example.com/${id}`,
     `Title for ${id}`,
-    "snippet",
+    "description",
     null,
     JSON.stringify(opts.coins ?? ["BTC"]),
     opts.importance ?? "important",
     published,
     now,
     expiresAt,
-    opts.fullSummary === undefined ? "summary text" : opts.fullSummary,
+    opts.summary === undefined ? "summary text" : opts.summary,
     opts.aiRelevant === undefined ? 1 : opts.aiRelevant,
     opts.aiDuplicateOf ?? null,
     opts.dismissedAt ?? null,
@@ -102,12 +105,15 @@ describe("NewsService.listRecentRelevant", () => {
     expect(out[0].id).not.toBe(oldId);
   });
 
-  test("excludes articles with null full_summary", () => {
-    insert({ fullSummary: null });
-    insert({ fullSummary: "ready" });
+  test("does NOT gate on summary — observer feeds both summarized and unsummarized rows", () => {
+    // Summarization is on-demand now, so listRecentRelevant must surface
+    // articles regardless of whether the user has ever clicked Summarize.
+    // The observer's news detector falls back to `description` when
+    // `summary` is null (see src/observer/detect/news.ts).
+    insert({ summary: null });
+    insert({ summary: "ready" });
     const out = service.listRecentRelevant(0);
-    expect(out).toHaveLength(1);
-    expect(out[0].fullSummary).toBe("ready");
+    expect(out).toHaveLength(2);
   });
 
   test("excludes articles where ai_relevant != 1", () => {

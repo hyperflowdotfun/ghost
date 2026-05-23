@@ -16,16 +16,22 @@ const COPY = {
     helper: 'Tell the AI how you want your news. It will filter, sort, and summarize accordingly.',
     placeholder:
       "Only show macro news that could affect BTC in the next 24h. Skip altcoin pumps and exchange announcements. Summarize in one line from a trader's perspective.",
+    toggleLabel: 'Apply filter',
     getMethod: 'trading.news.filter.get',
     setMethod: 'trading.news.filter.set',
+    getEnabledMethod: 'trading.news.filter.enabled.get',
+    setEnabledMethod: 'trading.news.filter.enabled.set',
   },
   tweets: {
     title: 'Tweets Filter',
     helper: 'Tell the AI how you want your tweets. It will filter, sort, and summarize accordingly.',
     placeholder:
       'Only liquidations > $1M, and major exchange or regulator announcements. Skip memecoin shilling.',
+    toggleLabel: 'Apply filter',
     getMethod: 'trading.tweets.filter.get',
     setMethod: 'trading.tweets.filter.set',
+    getEnabledMethod: 'trading.tweets.filter.enabled.get',
+    setEnabledMethod: 'trading.tweets.filter.enabled.set',
   },
 } as const;
 
@@ -33,28 +39,45 @@ export function FilterPromptModal({ open, onClose, kind }: FilterPromptModalProp
   const { request, connected } = useGateway();
   const copy = COPY[kind];
   const [prompt, setPrompt] = useState('');
+  const [enabled, setEnabled] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Re-fetch on every open so a stale local state doesn't shadow another
-  // session that edited the prompt (e.g. CLI / second browser tab). The
-  // gateway returns the built-in default when no override is stored, so the
-  // textarea always starts with the prompt the evaluator is using right now.
+  // Re-fetch every open so a sibling tab's edits don't get shadowed by stale state.
   useEffect(() => {
     if (!open || !connected) return;
     let cancelled = false;
     setError(null);
-    request<{ prompt: string }>(copy.getMethod)
-      .then((res) => {
-        if (!cancelled) setPrompt(res.prompt ?? '');
-      })
-      .catch(() => {
-        if (!cancelled) setPrompt('');
-      });
+    Promise.all([
+      request<{ prompt: string }>(copy.getMethod).catch(() => ({ prompt: '' })),
+      request<{ enabled: boolean }>(copy.getEnabledMethod).catch(() => ({ enabled: false })),
+    ]).then(([promptRes, enabledRes]) => {
+      if (cancelled) return;
+      setPrompt(promptRes.prompt ?? '');
+      setEnabled(Boolean(enabledRes.enabled));
+    });
     return () => {
       cancelled = true;
     };
-  }, [open, connected, request, copy.getMethod]);
+  }, [open, connected, request, copy.getMethod, copy.getEnabledMethod]);
+
+  // Optimistic: flip first, roll back on RPC failure.
+  const toggleEnabled = useCallback(async () => {
+    const next = !enabled;
+    setEnabled(next);
+    try {
+      const res = await request<{ ok: boolean; error?: string }>(copy.setEnabledMethod, {
+        enabled: next,
+      });
+      if (!res.ok) {
+        setEnabled(!next);
+        setError(res.error ?? 'Failed to toggle filter');
+      }
+    } catch {
+      setEnabled(!next);
+      setError('Failed to toggle filter');
+    }
+  }, [enabled, request, copy.setEnabledMethod]);
 
   const save = useCallback(async () => {
     if (saving) return;
@@ -80,18 +103,19 @@ export function FilterPromptModal({ open, onClose, kind }: FilterPromptModalProp
   }, [prompt, saving, request, copy.setMethod, onClose]);
 
   const remaining = MAX_LEN - prompt.length;
+  const promptDisabled = saving || !enabled;
 
   return (
     <TerminalModal
       open={open}
       onClose={onClose}
       title={copy.title}
-      width={450}
+      width={460}
       hideHeader
-      cardClassName="bg-[var(--color-surface-base)] border border-[var(--color-border-default)] rounded-[2px]"
-      bodyClassName="flex flex-col items-end gap-2 pt-4 pb-5 px-4"
+      cardClassName="bg-[var(--color-surface-base)] border border-[var(--color-border-default)] rounded-[8px]"
+      bodyClassName="flex flex-col p-0"
     >
-      <div className="flex items-center justify-between w-full">
+      <header className="flex items-center justify-between px-5 pt-4 pb-3 border-b border-[var(--color-border-subtle)]">
         <span className="text-body-md-semibold text-[var(--color-text-primary)] leading-[1.5]">
           {copy.title}
         </span>
@@ -111,38 +135,66 @@ export function FilterPromptModal({ open, onClose, kind }: FilterPromptModalProp
             />
           </svg>
         </button>
-      </div>
+      </header>
 
-      <div className="flex flex-col items-end gap-5 w-full">
-        <div className="flex flex-col gap-1.5 w-full">
-          <p className="text-body-sm text-[var(--color-text-tertiary)] leading-[1.5] m-0">
-            {copy.helper}
-          </p>
-          <textarea
-            value={prompt}
-            onChange={(e) => {
-              setPrompt(e.target.value);
-              if (error) setError(null);
-            }}
-            placeholder={copy.placeholder}
-            aria-label={copy.title}
-            maxLength={MAX_LEN}
-            disabled={saving}
-            className="w-full h-[127px] bg-[var(--color-surface-canvas)] border border-[var(--color-border-subtle)] rounded-[4px] px-4 py-3 text-body-sm text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)] leading-[1.5] outline-none focus:outline-none focus-visible:outline-none resize-none disabled:opacity-50"
-          />
-          {error && <div className="text-footnote text-[var(--color-error-default)] m-0">{error}</div>}
-          {!error && remaining < 200 && (
-            <div className="text-footnote text-[var(--color-text-tertiary)] m-0">{remaining} chars left</div>
-          )}
+      <button
+        type="button"
+        role="switch"
+        aria-checked={enabled}
+        onClick={toggleEnabled}
+        className="flex items-center justify-between gap-4 w-full px-5 py-4 bg-transparent border-0 cursor-pointer text-left transition-colors duration-fast ease-out hover:bg-white/[0.02] border-b border-[var(--color-border-subtle)]"
+      >
+        <div className="flex flex-col gap-1 min-w-0">
+          <span className="text-body-md-medium text-[var(--color-text-primary)] leading-[1.4]">
+            {copy.toggleLabel}
+          </span>
+          <span className="text-body-sm text-[var(--color-text-tertiary)] leading-[1.4]">
+            {enabled ? 'AI is filtering and sorting your feed.' : 'All articles pass through unfiltered.'}
+          </span>
         </div>
-        <button
-          type="button"
-          onClick={save}
-          disabled={saving}
-          className="h-9 px-4 rounded-[4px] bg-[var(--color-brand-default)] text-[var(--color-text-on-brand)] text-body-md-semibold leading-[1.5] cursor-pointer border-0 hover:opacity-90 disabled:opacity-50 transition-opacity duration-fast ease-out"
+        <span
+          aria-hidden="true"
+          className="relative inline-block w-[34px] h-[18px] rounded-full transition-colors duration-fast ease-out flex-shrink-0"
+          style={{ background: enabled ? 'var(--color-brand-default)' : 'rgba(110, 116, 128, 0.5)' }}
         >
-          {saving ? 'Saving…' : 'Save'}
-        </button>
+          <span
+            className="absolute top-[2px] w-[14px] h-[14px] rounded-full bg-white transition-[left] duration-fast ease-out"
+            style={{ left: enabled ? 18 : 2 }}
+          />
+        </span>
+      </button>
+
+      <div className={'flex flex-col gap-3 px-5 pt-4 pb-5 transition-opacity duration-fast ease-out ' + (enabled ? 'opacity-100' : 'opacity-50')}>
+        <p className="text-body-sm text-[var(--color-text-tertiary)] leading-[1.5] m-0">
+          {copy.helper}
+        </p>
+        <textarea
+          value={prompt}
+          onChange={(e) => {
+            setPrompt(e.target.value);
+            if (error) setError(null);
+          }}
+          placeholder={copy.placeholder}
+          aria-label={copy.title}
+          maxLength={MAX_LEN}
+          disabled={promptDisabled}
+          className="w-full h-[140px] bg-[var(--color-surface-canvas)] border border-[var(--color-border-subtle)] rounded-[6px] px-3.5 py-3 text-body-sm text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)] leading-[1.5] outline-none focus:outline-none focus-visible:outline-none resize-none disabled:cursor-not-allowed"
+        />
+        <div className="flex items-center justify-between gap-3 min-h-[20px]">
+          {error ? (
+            <span className="text-footnote text-[var(--color-error-default)]">{error}</span>
+          ) : remaining < 200 ? (
+            <span className="text-footnote text-[var(--color-text-tertiary)]">{remaining} chars left</span>
+          ) : <span aria-hidden="true" />}
+          <button
+            type="button"
+            onClick={save}
+            disabled={promptDisabled}
+            className="h-9 px-4 rounded-[6px] bg-[var(--color-brand-default)] text-[var(--color-text-on-brand)] text-body-md-semibold leading-[1.5] cursor-pointer border-0 hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed transition-opacity duration-fast ease-out"
+          >
+            {saving ? 'Saving…' : 'Save'}
+          </button>
+        </div>
       </div>
     </TerminalModal>
   );

@@ -62,20 +62,14 @@ export class LaunchdController implements ServiceController {
     ensureLogDir(opts.logDir);
 
     const definitionPath = plistPath();
-    // Daemon stdout + stderr point at the same file. The daemon writes pino
-    // JSON to stdout; launchd's append-mode redirect makes the file the only
-    // log destination and also captures native crash output (Bun runtime
-    // panics, malloc errors) that pino can't see.
-    const stdoutLog = join(opts.logDir, "ghost.log");
-    const stderrLog = stdoutLog;
-
+    // Daemon stdout/stderr are unmanaged — launchd writes them to its default
+    // sink (unified logging on modern macOS). Pino-roll owns ghost.log
+    // in-process; pre-flush crash output is not captured to a Ghost-owned file.
     const plist = buildPlist({
       label: LABEL,
       bunPath: opts.bunPath,
       execPath: opts.execPath,
       workingDir: join(homedir(), ".ghost"),
-      stdoutLog,
-      stderrLog,
       env: opts.env ?? {},
     });
 

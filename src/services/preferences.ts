@@ -11,6 +11,8 @@ import type { Logger } from "pino";
 
 export const TWEET_FILTER_PROMPT_KEY = "tweets.filter_prompt";
 export const NEWS_FILTER_PROMPT_KEY = "news.filter_prompt";
+export const TWEET_FILTER_ENABLED_KEY = "tweets.filter_enabled";
+export const NEWS_FILTER_ENABLED_KEY = "news.filter_enabled";
 export const USER_TIMEZONE_KEY = "user.timezone";
 
 interface Stmts {
@@ -78,5 +80,25 @@ export class PreferenceStore {
   setTimezone(tz: string): void {
     if (tz.length === 0) this.delete(USER_TIMEZONE_KEY);
     else this.set(USER_TIMEZONE_KEY, tz);
+  }
+
+  // Absence == OFF: deleting the key restores the default.
+
+  getNewsFilterEnabled(): boolean {
+    return this.get(NEWS_FILTER_ENABLED_KEY) === "1";
+  }
+
+  setNewsFilterEnabled(enabled: boolean): void {
+    if (enabled) this.set(NEWS_FILTER_ENABLED_KEY, "1");
+    else this.delete(NEWS_FILTER_ENABLED_KEY);
+  }
+
+  getTweetFilterEnabled(): boolean {
+    return this.get(TWEET_FILTER_ENABLED_KEY) === "1";
+  }
+
+  setTweetFilterEnabled(enabled: boolean): void {
+    if (enabled) this.set(TWEET_FILTER_ENABLED_KEY, "1");
+    else this.delete(TWEET_FILTER_ENABLED_KEY);
   }
 }

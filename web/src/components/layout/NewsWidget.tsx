@@ -130,8 +130,6 @@ export function NewsWidget() {
     return () => document.removeEventListener('mousedown', handler);
   }, [menuOpenId]);
 
-  // Articles render as soon as they arrive — fullSummary is daemon-cached,
-  // no per-row gate. sourceFilter still narrows the visible set.
   const visible = sourceFilter
     ? articles.filter((a) => a.sourceId === sourceFilter)
     : articles;
@@ -242,6 +240,7 @@ export function NewsWidget() {
       />
       {panelArticle && (
         <NewsArticlePanel
+          key={panelArticle.id}
           article={panelArticle}
           compact={narrowViewport}
           onClose={closeBoth}

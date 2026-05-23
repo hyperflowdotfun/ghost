@@ -7,14 +7,6 @@ export interface UnitOptions {
   description: string;
   execStart: string;
   workingDir: string;
-  /**
-   * Absolute path to the log file. Daemon stdout+stderr are redirected here
-   * via `StandardOutput=append:` / `StandardError=append:` so `ghost logs`
-   * can tail it the same way it does on macOS (launchd) and Windows
-   * (schtasks). Without this, stdout would go to journald and the file
-   * `ghost logs` polls would never appear.
-   */
-  logFile: string;
   env: Record<string, string>;
 }
 
@@ -45,7 +37,6 @@ export function buildUnit(opts: UnitOptions): string {
   assertNoLineBreaks(opts.description, "Unit description");
   assertNoLineBreaks(opts.execStart, "ExecStart");
   assertNoLineBreaks(opts.workingDir, "WorkingDirectory");
-  assertNoLineBreaks(opts.logFile, "Log file path");
 
   const envLines = renderEnvLines(opts.env);
 
@@ -64,8 +55,6 @@ export function buildUnit(opts: UnitOptions): string {
     "SuccessExitStatus=0 143",
     "KillMode=control-group",
     `WorkingDirectory=${opts.workingDir}`,
-    `StandardOutput=append:${opts.logFile}`,
-    `StandardError=append:${opts.logFile}`,
     ...envLines,
     "",
     "[Install]",

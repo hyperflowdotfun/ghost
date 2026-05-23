@@ -1,6 +1,4 @@
 import fs from "node:fs/promises";
-import { join } from "node:path";
-import { defaultLogDir } from "../../services/os/utils.js";
 
 export const DEFAULT_LIMIT = 200;
 export const DEFAULT_MAX_BYTES = 250_000;
@@ -15,10 +13,6 @@ export type LogTailPayload = {
   truncated: boolean;
   reset: boolean;
 };
-
-export function defaultLogPath(): string {
-  return join(defaultLogDir(), "ghost.log");
-}
 
 function clamp(n: number, lo: number, hi: number): number {
   if (!Number.isFinite(n)) return lo;

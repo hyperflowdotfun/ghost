@@ -4,6 +4,7 @@ import { NewsService } from "../../src/services/news.js";
 import { WatchlistService } from "../../src/services/watchlist.js";
 import { NOOP_LOGGER } from "../../src/logger.js";
 import { initDatabase } from "../../src/core/database.js";
+import { DB_MIGRATIONS } from "../../src/core/migrations/registry.js";
 import { tokenize, tokenOverlap, stripHtmlToText, mapRow } from "../../src/services/news-helpers.js";
 import { tagCoins, createAdapter, CryptoPanicAdapter, RssAdapter, CoinGeckoAdapter } from "../../src/services/news-sources.js";
 import {
@@ -22,6 +23,16 @@ function createTempDb(): { db: Database; path: string } {
   mkdirSync(dir, { recursive: true });
   const dbPath = join(dir, "test.db");
   const db = initDatabase(dbPath);
+  // Apply all schema migrations so the test sees the same column names the
+  // runtime does (description/summary/body — see migration v11).
+  for (const m of DB_MIGRATIONS) {
+    const up = m.up(db);
+    // Migrations may be async, but the v1–v11 set is currently all sync;
+    // assert here so a future async migration trips loudly.
+    if (up && typeof (up as Promise<void>).then === "function") {
+      throw new Error("Async DB migration cannot be applied from sync test helper");
+    }
+  }
   return { db, path: dbPath };
 }
 
@@ -33,14 +44,14 @@ function insertArticle(
     external_id: string;
     url: string;
     title: string;
-    snippet: string;
+    description: string;
     image_url: string | null;
     coins: string;
     importance: string;
     published_at: number;
     fetched_at: number;
     expires_at: number;
-    full_summary: string | null;
+    summary: string | null;
   }> = {},
 ) {
   const now = Math.floor(Date.now() / 1000);
@@ -50,28 +61,28 @@ function insertArticle(
     external_id: `ext-${crypto.randomUUID()}`,
     url: "https://example.com/article",
     title: "Test Article",
-    snippet: "Test snippet",
+    description: "Test description",
     image_url: null,
     coins: "[]",
     importance: "reference",
     published_at: now,
     fetched_at: now,
     expires_at: now + 86400,
-    // getArticles filters on `full_summary IS NOT NULL` (the widget
+    // getArticles filters on `summary IS NOT NULL` (the widget
     // contract is "showed = ready to read"); default fixtures simulate
     // the post-summarize state. Tests that need the pre-summarize state
-    // should pass `full_summary: null` explicitly.
-    full_summary: "Test summary",
+    // should pass `summary: null` explicitly.
+    summary: "Test summary",
   };
   const row = { ...defaults, ...overrides };
   db.prepare(`
     INSERT INTO articles
-      (id, source_id, external_id, url, title, snippet, image_url, coins, importance, published_at, fetched_at, expires_at, full_summary, ai_relevant)
+      (id, source_id, external_id, url, title, description, image_url, coins, importance, published_at, fetched_at, expires_at, summary, ai_relevant)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
   `).run(
-    row.id, row.source_id, row.external_id, row.url, row.title, row.snippet,
+    row.id, row.source_id, row.external_id, row.url, row.title, row.description,
     row.image_url, row.coins, row.importance, row.published_at, row.fetched_at,
-    row.expires_at, row.full_summary,
+    row.expires_at, row.summary,
   );
   return row;
 }
@@ -169,42 +180,42 @@ describe("news-helpers", () => {
         external_id: "ext-456",
         url: "https://example.com",
         title: "Test",
-        snippet: "Snippet",
+        description: "Snippet",
         image_url: null,
         coins: '["BTC","ETH"]',
         importance: "urgent",
         published_at: 1000,
         fetched_at: 2000,
         expires_at: 3000,
-        full_summary: "Summary text",
+        summary: "Summary text",
       };
       const article = mapRow(row);
       expect(article.id).toBe("abc-123");
       expect(article.sourceId).toBe("coindesk");
       expect(article.coins).toEqual(["BTC", "ETH"]);
       expect(article.importance).toBe("urgent");
-      expect(article.fullSummary).toBe("Summary text");
+      expect(article.summary).toBe("Summary text");
     });
 
-    test("handles null image_url and full_summary", () => {
+    test("handles null image_url and summary", () => {
       const row = {
         id: "abc",
         source_id: "src",
         external_id: "ext",
         url: "https://example.com",
         title: "Test",
-        snippet: "",
+        description: "",
         image_url: null,
         coins: "[]",
         importance: "reference",
         published_at: 1000,
         fetched_at: 2000,
         expires_at: 3000,
-        full_summary: null,
+        summary: null,
       };
       const article = mapRow(row);
       expect(article.imageUrl).toBeNull();
-      expect(article.fullSummary).toBeNull();
+      expect(article.summary).toBeNull();
     });
   });
 });
@@ -571,22 +582,23 @@ describe("NewsService", () => {
 // NewsService — CRUD methods
 // ---------------------------------------------------------------------------
 
-describe("NewsService CRUD — listPendingSummaries / saveSummary", () => {
+describe("NewsService CRUD — saveSummary / body cache", () => {
   let db: Database;
   let service: NewsService;
 
   /**
-   * Insert an article whose ai_relevant and full_summary can be controlled.
+   * Insert an article whose ai_relevant and summary can be controlled.
    * Differs from the module-level helper (which always sets ai_relevant=1 and
-   * full_summary="Test summary") so we can place articles in the pre-summary
+   * summary="Test summary") so we can place articles in the pre-summary
    * and pre-evaluation states needed by these tests.
    */
   function insertRaw(
     overrides: Partial<{
       id: string;
       title: string;
-      snippet: string;
-      full_summary: string | null;
+      description: string;
+      summary: string | null;
+      body: string | null;
       ai_relevant: number | null;
     }> = {},
   ): string {
@@ -594,17 +606,18 @@ describe("NewsService CRUD — listPendingSummaries / saveSummary", () => {
     const now = Math.floor(Date.now() / 1000);
     db.prepare(`
       INSERT INTO articles
-        (id, source_id, external_id, url, title, snippet, image_url, coins,
-         importance, published_at, fetched_at, expires_at, full_summary, ai_relevant)
+        (id, source_id, external_id, url, title, description, image_url, coins,
+         importance, published_at, fetched_at, expires_at, summary, body, ai_relevant)
       VALUES (?, 'coindesk', ?, 'https://example.com', ?, ?, null, '[]',
-              'reference', ?, ?, ?, ?, ?)
+              'reference', ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       `ext-${crypto.randomUUID()}`,
       overrides.title ?? "Crypto Article",
-      overrides.snippet ?? "Bitcoin price update",
+      overrides.description ?? "Bitcoin price update",
       now, now, now + 86400,
-      overrides.full_summary ?? null,
+      overrides.summary ?? null,
+      overrides.body ?? null,
       overrides.ai_relevant ?? null,
     );
     return id;
@@ -617,52 +630,20 @@ describe("NewsService CRUD — listPendingSummaries / saveSummary", () => {
     service = new NewsService(db, watchlist, undefined, NOOP_LOGGER);
   });
 
-  test("listPendingSummaries returns articles with ai_relevant=1 and full_summary IS NULL", () => {
-    // 3 unsummarized relevant articles
-    const id1 = insertRaw({ ai_relevant: 1, full_summary: null });
-    const id2 = insertRaw({ ai_relevant: 1, full_summary: null });
-    const id3 = insertRaw({ ai_relevant: 1, full_summary: null });
-    // 1 already summarized — must NOT appear
-    insertRaw({ ai_relevant: 1, full_summary: "done" });
-    // 1 not yet evaluated — must NOT appear
-    insertRaw({ ai_relevant: null, full_summary: null });
-
-    const results = service.listPendingSummaries(10);
-    const ids = results.map((a) => a.id);
-
-    expect(ids).toContain(id1);
-    expect(ids).toContain(id2);
-    expect(ids).toContain(id3);
-    expect(results).toHaveLength(3);
-  });
-
-  test("listPendingSummaries respects the limit parameter", () => {
-    insertRaw({ ai_relevant: 1, full_summary: null });
-    insertRaw({ ai_relevant: 1, full_summary: null });
-    insertRaw({ ai_relevant: 1, full_summary: null });
-
-    const results = service.listPendingSummaries(2);
-    expect(results).toHaveLength(2);
-  });
-
-  test("saveSummary writes the text and excludes the article from subsequent listPendingSummaries", () => {
-    const id = insertRaw({ ai_relevant: 1, full_summary: null });
-
-    // Before save — appears in pending
-    expect(service.listPendingSummaries(10).map((a) => a.id)).toContain(id);
-
-    service.saveSummary(id, "AI-generated summary");
-
-    // After save — no longer pending
-    expect(service.listPendingSummaries(10).map((a) => a.id)).not.toContain(id);
-  });
-
   test("saveSummary persists the summary text so getArticle returns it", () => {
-    const id = insertRaw({ ai_relevant: 1, full_summary: null });
+    const id = insertRaw({ ai_relevant: 1, summary: null });
     service.saveSummary(id, "persisted summary text");
 
     const article = service.getArticle(id);
-    expect(article?.fullSummary).toBe("persisted summary text");
+    expect(article?.summary).toBe("persisted summary text");
+  });
+
+  test("getBody / saveBody round-trip a body string", () => {
+    const id = insertRaw({ ai_relevant: 1, body: null });
+    expect(service.getBody(id)).toBeNull();
+
+    service.saveBody(id, "Full article body fetched from URL.");
+    expect(service.getBody(id)).toBe("Full article body fetched from URL.");
   });
 });
 
@@ -674,8 +655,8 @@ describe("NewsService CRUD — listPendingEvaluations / saveEvaluation", () => {
     overrides: Partial<{
       id: string;
       title: string;
-      snippet: string;
-      full_summary: string | null;
+      description: string;
+      summary: string | null;
       ai_relevant: number | null;
     }> = {},
   ): string {
@@ -683,17 +664,17 @@ describe("NewsService CRUD — listPendingEvaluations / saveEvaluation", () => {
     const now = Math.floor(Date.now() / 1000);
     db.prepare(`
       INSERT INTO articles
-        (id, source_id, external_id, url, title, snippet, image_url, coins,
-         importance, published_at, fetched_at, expires_at, full_summary, ai_relevant)
+        (id, source_id, external_id, url, title, description, image_url, coins,
+         importance, published_at, fetched_at, expires_at, summary, ai_relevant)
       VALUES (?, 'coindesk', ?, 'https://example.com', ?, ?, null, '[]',
               'reference', ?, ?, ?, ?, ?)
     `).run(
       id,
       `ext-${crypto.randomUUID()}`,
       overrides.title ?? "Bitcoin hits new high",
-      overrides.snippet ?? "bitcoin crypto price market",
+      overrides.description ?? "bitcoin crypto price market",
       now, now, now + 86400,
-      overrides.full_summary ?? null,
+      overrides.summary ?? null,
       overrides.ai_relevant ?? null,
     );
     return id;
@@ -722,31 +703,31 @@ describe("NewsService CRUD — listPendingEvaluations / saveEvaluation", () => {
     expect(candidateIds).toContain(id2);
   });
 
-  test("rule-based pre-filter marks non-crypto articles irrelevant immediately", () => {
-    // Non-crypto titles/snippets — will be pre-filtered
+  test("listPendingEvaluations no longer applies the rule-based pre-filter (moved to news-fetch)", () => {
+    // After the pipeline refactor, non-crypto items are dropped at fetch time
+    // before they ever reach the DB, so listPendingEvaluations simply returns
+    // every pending row verbatim — both crypto and (in theory) non-crypto.
     const ncId = insertRaw({
       ai_relevant: null,
       title: "Premier League transfer news",
-      snippet: "Manchester United signs new striker",
+      description: "Manchester United signs new striker",
     });
-    // Crypto article — passes pre-filter
     const cryptoId = insertRaw({
       ai_relevant: null,
       title: "Bitcoin ETF approved",
-      snippet: "bitcoin crypto market",
+      description: "bitcoin crypto market",
     });
 
     const { candidates, total } = service.listPendingEvaluations(20);
     expect(total).toBe(2);
-    // Only the crypto article survives pre-filter
-    expect(candidates.map((c) => c.id)).toContain(cryptoId);
-    expect(candidates.map((c) => c.id)).not.toContain(ncId);
+    expect(candidates.map((c) => c.id).sort()).toEqual([ncId, cryptoId].sort());
 
-    // Non-crypto article is immediately marked irrelevant (ai_relevant=0)
+    // No automatic UPDATE happens at this stage — `ai_relevant` stays NULL
+    // until the evaluate job (or the toggle-off bypass) writes it.
     const row = db.prepare("SELECT ai_relevant FROM articles WHERE id = ?").get(ncId) as {
-      ai_relevant: number;
+      ai_relevant: number | null;
     };
-    expect(row.ai_relevant).toBe(0);
+    expect(row.ai_relevant).toBeNull();
   });
 
   test("listPendingEvaluations returns zero when no pending articles exist", () => {
@@ -756,9 +737,9 @@ describe("NewsService CRUD — listPendingEvaluations / saveEvaluation", () => {
   });
 
   test("saveEvaluation marks selectedIds as relevant and others as irrelevant", () => {
-    const id1 = insertRaw({ ai_relevant: null, title: "Bitcoin halving", snippet: "bitcoin crypto" });
-    const id2 = insertRaw({ ai_relevant: null, title: "Ethereum merge", snippet: "ethereum crypto" });
-    const id3 = insertRaw({ ai_relevant: null, title: "Solana update", snippet: "solana crypto blockchain" });
+    const id1 = insertRaw({ ai_relevant: null, title: "Bitcoin halving", description: "bitcoin crypto" });
+    const id2 = insertRaw({ ai_relevant: null, title: "Ethereum merge", description: "ethereum crypto" });
+    const id3 = insertRaw({ ai_relevant: null, title: "Solana update", description: "solana crypto blockchain" });
 
     const { candidates } = service.listPendingEvaluations(20);
     // Only id1 selected as relevant
@@ -773,8 +754,8 @@ describe("NewsService CRUD — listPendingEvaluations / saveEvaluation", () => {
   });
 
   test("saveEvaluation with empty selectedIds marks all candidates irrelevant", () => {
-    const id1 = insertRaw({ ai_relevant: null, title: "Bitcoin news", snippet: "bitcoin crypto market" });
-    const id2 = insertRaw({ ai_relevant: null, title: "ETH staking", snippet: "ethereum crypto staking" });
+    const id1 = insertRaw({ ai_relevant: null, title: "Bitcoin news", description: "bitcoin crypto market" });
+    const id2 = insertRaw({ ai_relevant: null, title: "ETH staking", description: "ethereum crypto staking" });
 
     const { candidates } = service.listPendingEvaluations(20);
     service.saveEvaluation(candidates, []);
@@ -787,7 +768,7 @@ describe("NewsService CRUD — listPendingEvaluations / saveEvaluation", () => {
   });
 
   test("saved evaluations are excluded from subsequent listPendingEvaluations", () => {
-    const id = insertRaw({ ai_relevant: null, title: "Bitcoin price", snippet: "bitcoin crypto" });
+    const id = insertRaw({ ai_relevant: null, title: "Bitcoin price", description: "bitcoin crypto" });
 
     const { candidates: before } = service.listPendingEvaluations(20);
     expect(before.map((c) => c.id)).toContain(id);

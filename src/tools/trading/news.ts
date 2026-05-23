@@ -162,7 +162,7 @@ export function createNewsSearchTools(news: NewsService): AgentTool[] {
             const ago = timeAgo(a.publishedAt);
             const coins = a.coins.length > 0 ? ` [${a.coins.join(", ")}]` : "";
             lines.push(`[${a.sourceId}] ${a.title}${coins} (${ago})`);
-            lines.push(a.snippet);
+            lines.push(a.summary ?? a.description);
             lines.push(`  ${a.url}`);
             lines.push("");
           }

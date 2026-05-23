@@ -41,7 +41,7 @@ export async function runDaemonStopCli(): Promise<void> {
   const { resolveServiceController } = await import("../../services/os/controller.js");
   const { createRootLogger } = await import("../../logger.js");
   const { confirm, isCancel } = await import("@clack/prompts");
-  const cliLogger = createRootLogger(0);
+  const cliLogger = await createRootLogger(0);
   const controller = resolveServiceController(cliLogger.child({ module: "service" }));
   await runDaemonStop({
     controller,

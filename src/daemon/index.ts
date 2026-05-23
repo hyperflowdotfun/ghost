@@ -23,15 +23,12 @@ import { getConfigPath } from "../config/index.js";
 import { createCronDeliveryHandler } from "../scheduler/delivery.js";
 import { printDaemonStartupBanner } from "../helpers/banner.js";
 import { BackgroundJobRunner, registerDefaultJobs } from "./jobs/index.js";
-import {
-  installCrashHandlers,
-  installShutdownHandlers,
-  setCrashCleanup,
-} from "./shutdown.js";
+import { installShutdownHandlers } from "./shutdown.js";
 import { telegramPlugin } from "../channels/telegram/plugin.js";
 import { ChannelId } from "../channels/types.js";
 import { ChannelEvents } from "../events/pairing-events.js";
 import { buildBuiltInJobs } from "../scheduler/defaults.js";
+import { EXIT_UNCAUGHT_EXCEPTION, EXIT_UNHANDLED_REJECTION } from "../helpers/exit-codes.js";
 
 import type { PaperConfig } from "../config/schema.js";
 import type { Logger } from "pino";
@@ -141,9 +138,15 @@ export function broadcastEventToWeb(
 export async function startDaemon(options: DaemonOptions): Promise<void> {
   const logger = options.logger;
 
-  // 0. Install crash handlers BEFORE any subsystem boot so a throw in a
-  //    constructor or top-level await is still logged and exits non-zero.
-  installCrashHandlers(logger);
+  // 0. Handle uncaught errors — supervisor needs exit 100 / 101 to respawn.
+  process.on("uncaughtException", (error) => {
+    console.error("[ghost] Uncaught exception:", error);
+    process.exit(EXIT_UNCAUGHT_EXCEPTION);
+  });
+  process.on("unhandledRejection", (reason) => {
+    console.error("[ghost] Unhandled rejection:", reason);
+    process.exit(EXIT_UNHANDLED_REJECTION);
+  });
 
   // 1. Guard against duplicate instances (TTY-only OS service check).
   await guardAgainstRunningService(logger);
@@ -262,6 +265,7 @@ export async function startDaemon(options: DaemonOptions): Promise<void> {
     pairingService: runtime.pairingService,
     credentials,
     channelManager: runtime.channelManager,
+    runner: runtime.runner,
     logger: logger.child({ module: "gateway" }),
   });
   const { app, clientManager, stopPriceFeed } = gateway;
@@ -314,6 +318,8 @@ export async function startDaemon(options: DaemonOptions): Promise<void> {
   // instead of waiting for the next scheduled tick.
   runtime.xFollowService.onEnable(() => runner.kick("tweet-fetch"));
 
+  // 11. Await wallet readiness, then bind the gateway listener. ensureMeta
+  //     is best-effort — first-use retry handles a cold Hyperliquid endpoint.
   await runtime.walletReady;
   await tradingClient.ensureMeta().catch((err) => {
     logger.warn({ err }, "ensureMeta on startup failed — will retry on first use");
@@ -332,14 +338,13 @@ export async function startDaemon(options: DaemonOptions): Promise<void> {
   const gatewayUrl = `http://${config.gateway.host}:${config.gateway.port}`;
   logger.info({ module: "daemon" }, `Gateway listening on ${gatewayUrl}`);
 
-  // 13. Install signal handlers (SIGINT + SIGTERM → clean shutdown) and
-  //     hand the same cleanup body to the crash handler so unhandled errors
-  //     drain the DB / channels before exiting non-zero for supervisor restart.
-  const cleanup = installShutdownHandlers({
+  // 13. Install signal handlers (SIGINT + SIGTERM → clean shutdown).
+  //     Crash path skips cleanup entirely — supervisor restart heals state
+  //     via WAL replay, Telegram offset re-sync, and idempotent jobs.
+  installShutdownHandlers({
     runtime,
     gatewayHandle: { stopPriceFeed, app },
     unsubscribeBus,
     stopBackground: () => runner.stop(),
   });
-  setCrashCleanup(cleanup);
 }

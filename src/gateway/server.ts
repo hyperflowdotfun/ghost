@@ -83,6 +83,8 @@ export interface GatewayAgentDeps {
   /** Live timezone service — used by config.timezone.{get,set} RPCs. */
   timezoneService: TimezoneService;
   skillService: SkillService;
+  /** Shared taskAgent runner — exposed so on-demand LLM RPCs (e.g. news.summarize) can call it. */
+  runner: import("../agent/runner.js").Runner;
 }
 
 /** Trading and market data dependencies. */
@@ -176,7 +178,7 @@ export function createGateway(gatewayConfig: Config["gateway"], deps: GatewayDep
     cronService: deps.cronService,
   });
   const tokensSnapshot = new TokensSnapshotService(deps.tradingClient, deps.priceCache);
-  registerTradingMethods(registry.register.bind(registry), { tradingClient: deps.tradingClient, walletStore: deps.walletStore, alertRules: deps.alertRules, notifications: deps.notifications, newsService: deps.newsService, rssDiscovery: deps.rssDiscoveryService, tweetService: deps.tweetService, xFollowService: deps.xFollowService, preferenceStore: deps.preferenceStore, watchlist: deps.watchlistService, logger: deps.logger, tokensSnapshot, priceCache: deps.priceCache });
+  registerTradingMethods(registry.register.bind(registry), { tradingClient: deps.tradingClient, walletStore: deps.walletStore, alertRules: deps.alertRules, notifications: deps.notifications, newsService: deps.newsService, rssDiscovery: deps.rssDiscoveryService, tweetService: deps.tweetService, xFollowService: deps.xFollowService, preferenceStore: deps.preferenceStore, watchlist: deps.watchlistService, logger: deps.logger, tokensSnapshot, priceCache: deps.priceCache, runner: deps.runner });
   registerApprovalMethods(registry.register.bind(registry), { approvalManager: deps.approvalManager });
   registerToolApprovalMethods(registry.register.bind(registry), { approvalManager: deps.approvalManager });
   registerSkillsMethods(registry.register.bind(registry), { skillService: deps.skillService });

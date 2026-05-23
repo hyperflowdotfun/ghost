@@ -43,46 +43,46 @@ function atomContentDoc(content: string): string {
 </feed>`;
 }
 
-describe("parseRss snippet length preservation", () => {
+describe("parseRss description length preservation", () => {
   test("RSS description of 1500 chars is preserved (no truncation)", () => {
     const desc = "a".repeat(1500);
     const items = parseRss(rssDoc(desc), "test");
     expect(items).toHaveLength(1);
-    expect(items[0].snippet.length).toBe(1500);
+    expect(items[0].description.length).toBe(1500);
   });
 
   test("RSS description of 5000 chars is capped at 3000", () => {
     const desc = "b".repeat(5000);
     const items = parseRss(rssDoc(desc), "test");
     expect(items).toHaveLength(1);
-    expect(items[0].snippet.length).toBe(3000);
+    expect(items[0].description.length).toBe(3000);
   });
 
   test("Atom <summary> preserves length identically to RSS", () => {
     const text = "c".repeat(1500);
     const items = parseRss(atomSummaryDoc(text), "test");
     expect(items).toHaveLength(1);
-    expect(items[0].snippet.length).toBe(1500);
+    expect(items[0].description.length).toBe(1500);
   });
 
   test("Atom <summary> capped at 3000", () => {
     const text = "d".repeat(5000);
     const items = parseRss(atomSummaryDoc(text), "test");
     expect(items).toHaveLength(1);
-    expect(items[0].snippet.length).toBe(3000);
+    expect(items[0].description.length).toBe(3000);
   });
 
   test("Atom <content> preserves length identically to RSS", () => {
     const text = "e".repeat(1500);
     const items = parseRss(atomContentDoc(text), "test");
     expect(items).toHaveLength(1);
-    expect(items[0].snippet.length).toBe(1500);
+    expect(items[0].description.length).toBe(1500);
   });
 
   test("Atom <content> capped at 3000", () => {
     const text = "f".repeat(5000);
     const items = parseRss(atomContentDoc(text), "test");
     expect(items).toHaveLength(1);
-    expect(items[0].snippet.length).toBe(3000);
+    expect(items[0].description.length).toBe(3000);
   });
 });

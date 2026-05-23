@@ -15,7 +15,7 @@ export const NEWS_EVALUATION_SYSTEM =
 interface EvalArticle {
   id: string;
   title: string;
-  snippet: string;
+  description: string;
 }
 
 /**
@@ -45,7 +45,7 @@ export function buildEvaluationPrompt(
     .join("\n");
 
   const articleList = articles
-    .map((a, i) => `  ${i + 1}. [${a.id}] ${a.title} | ${a.snippet.slice(0, 100)}`)
+    .map((a, i) => `  ${i + 1}. [${a.id}] ${a.title} | ${a.description.slice(0, 100)}`)
     .join("\n");
 
   return `${instruction}

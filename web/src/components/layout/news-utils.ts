@@ -7,12 +7,13 @@ export interface NewsArticle {
   sourceId: string;
   url: string;
   title: string;
-  snippet: string;
+  description: string;
   imageUrl: string | null;
   coins: string[];
   importance: 'urgent' | 'important' | 'reference';
   publishedAt: number;
-  fullSummary: string | null;
+  body: string | null;
+  summary: string | null;
 }
 
 export const SOURCE_NAMES: Record<string, string> = {
@@ -51,13 +52,3 @@ export const MENU_ITEM_CLS =
 // Re-export the tweet-utils version (a superset — it accepts an optional
 // nowMs). Having two copies of the same function is begging for drift.
 export { timeAgo } from './tweet-utils';
-
-// Strip legacy section labels ("What happened:", "Who is affected:",
-// "Market impact:") from cached summaries written before the
-// label-free copy was introduced.
-export function stripLegacyLabels(text: string): string {
-  return text
-    .replace(/^\s*(what\s+happened|who\s+is\s+affected|market\s+impact)\s*:\s*/gim, '')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
-}

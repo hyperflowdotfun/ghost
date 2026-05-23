@@ -22,14 +22,16 @@ export function detectNews(input: NewsDetectorInput): NewsDetectorResult {
     // Defensive — SQL shouldn't return duplicates in one batch, but cheap
     // insurance against future query changes.
     if (seenThisTick.has(article.id)) continue;
-    if (article.fullSummary === null) continue;
+    // summary is generated on demand; description is the always-present fallback.
+    const summaryText = article.summary ?? article.description;
+    if (!summaryText || summaryText.length === 0) continue;
 
     events.push({
       type: "news",
       detectedAt: input.nowMs,
       articleId: article.id,
       title: article.title,
-      summary: article.fullSummary,
+      summary: summaryText,
       source: article.sourceId,
       url: article.url,
       publishedAt: article.publishedAt * 1000,

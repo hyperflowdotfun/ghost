@@ -7,8 +7,6 @@ describe("buildPlist", () => {
     bunPath: "/usr/local/bin/bun",
     execPath: "/usr/local/bin/ghost",
     workingDir: "/Users/test/.ghost",
-    stdoutLog: "/Users/test/.ghost/logs/ghost.log",
-    stderrLog: "/Users/test/.ghost/logs/ghost.err.log",
     env: {},
   };
 
@@ -32,10 +30,10 @@ describe("buildPlist", () => {
     expect(xml).toContain("<string>daemon</string>");
     expect(xml).toContain("<key>WorkingDirectory</key>");
     expect(xml).toContain("<string>/Users/test/.ghost</string>");
-    expect(xml).toContain("<key>StandardOutPath</key>");
-    expect(xml).toContain("<string>/Users/test/.ghost/logs/ghost.log</string>");
-    expect(xml).toContain("<key>StandardErrorPath</key>");
-    expect(xml).toContain("<string>/Users/test/.ghost/logs/ghost.err.log</string>");
+
+    // Stdout/stderr deliberately unmanaged — launchd uses its default sink.
+    expect(xml).not.toContain("<key>StandardOutPath</key>");
+    expect(xml).not.toContain("<key>StandardErrorPath</key>");
   });
 
   test("ProgramArguments contains execPath and 'daemon'", () => {

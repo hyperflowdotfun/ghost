@@ -51,6 +51,7 @@ function makeRegistry(): { reg: MethodRegistry; preferenceStore: PreferenceStore
     logger: noopLogger,
     tokensSnapshot: { build: () => ({ tokens: [], prices: {}, prevDayPrices: {}, maxLeverages: {} }) } as any,
     priceCache: { get: () => undefined, set: () => {} } as any,
+    runner: { call: async () => "" } as any,
   });
   return { reg, preferenceStore, db };
 }
@@ -122,5 +123,57 @@ describe.each([
     const res = (await reg.dispatch(setter, makeCtx(), {})) as SetResp;
     expect(res.ok).toBe(false);
     expect(res.error).toMatch(/Missing prompt/i);
+  });
+});
+
+interface EnabledGetResp { enabled: boolean }
+
+describe.each([
+  {
+    kind: "news" as const,
+    getter: "trading.news.filter.enabled.get",
+    setter: "trading.news.filter.enabled.set",
+  },
+  {
+    kind: "tweets" as const,
+    getter: "trading.tweets.filter.enabled.get",
+    setter: "trading.tweets.filter.enabled.set",
+  },
+])("$getter / $setter", ({ getter, setter }) => {
+  let reg: MethodRegistry;
+
+  beforeEach(() => {
+    ({ reg } = makeRegistry());
+  });
+
+  it("defaults to false when the key has never been set", async () => {
+    const res = (await reg.dispatch(getter, makeCtx(), {})) as EnabledGetResp;
+    expect(res.enabled).toBe(false);
+  });
+
+  it("set true → get true (round-trip)", async () => {
+    const setRes = (await reg.dispatch(setter, makeCtx(), { enabled: true })) as SetResp;
+    expect(setRes.ok).toBe(true);
+
+    const getRes = (await reg.dispatch(getter, makeCtx(), {})) as EnabledGetResp;
+    expect(getRes.enabled).toBe(true);
+  });
+
+  it("set false after set true clears the key (default re-enters)", async () => {
+    await reg.dispatch(setter, makeCtx(), { enabled: true });
+    await reg.dispatch(setter, makeCtx(), { enabled: false });
+    const res = (await reg.dispatch(getter, makeCtx(), {})) as EnabledGetResp;
+    expect(res.enabled).toBe(false);
+  });
+
+  it("rejects payloads without an enabled flag", async () => {
+    const res = (await reg.dispatch(setter, makeCtx(), {})) as SetResp;
+    expect(res.ok).toBe(false);
+    expect(res.error).toMatch(/Missing enabled/i);
+  });
+
+  it("rejects non-boolean enabled values", async () => {
+    const res = (await reg.dispatch(setter, makeCtx(), { enabled: "true" })) as SetResp;
+    expect(res.ok).toBe(false);
   });
 });

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Avatar } from '@/components/ui';
 import { useGateway } from '@/hooks/useGateway';
@@ -8,13 +8,7 @@ import {
   SOURCE_NAMES,
   timeAgo,
   sourceLogoUrl,
-  stripLegacyLabels,
 } from './news-utils';
-
-type PanelState =
-  | { kind: 'loading' }
-  | { kind: 'ready'; deepSummary: string }
-  | { kind: 'failed' };
 
 export interface NewsArticlePanelProps {
   article: NewsArticle;
@@ -24,63 +18,79 @@ export interface NewsArticlePanelProps {
   onClose: () => void;
 }
 
-const NEWS_PINK = '#ff61ff';
+type SummaryState =
+  | { kind: 'idle' }
+  | { kind: 'loading' }
+  | { kind: 'ready'; summary: string; cached: boolean }
+  | { kind: 'failed'; error: string };
 
-/** Article side-panel — portal-rendered overlay rendered to the LEFT of the
- *  news drawer (or in the drawer's slot on <1133px viewports). Fetches the
- *  AI-generated deep summary via trading.news.deepSummary on mount + on
- *  article change. Shares the drawer's scrim — NewsWidget closes both on
- *  scrim click. ESC also closes (capture-phase handler below). */
+type View = 'body' | 'summary';
+
 export function NewsArticlePanel({ article, compact, onClose }: NewsArticlePanelProps) {
   const { request } = useGateway();
-  const [state, setState] = useState<PanelState>({ kind: 'loading' });
+  const [view, setView] = useState<View>('body');
+  const [summary, setSummary] = useState<SummaryState>({ kind: 'idle' });
+  // Token bumped on every article switch / unmount. In-flight requests check
+  // their captured token against the current ref before applying state — late
+  // responses from a previous article get dropped.
+  const reqTokenRef = useRef(0);
+
+  // Reset view + cached summary when switching to a different article so the
+  // previous article's summary never bleeds into the new panel.
+  useEffect(() => {
+    reqTokenRef.current++;
+    setView('body');
+    setSummary({ kind: 'idle' });
+  }, [article.id]);
 
   useEffect(() => {
+    // Capture-phase Esc: pop summary view first, only close on second press.
     const handler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        e.stopPropagation();
-        onClose();
-      }
+      if (e.key !== 'Escape') return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (view === 'summary') setView('body');
+      else onClose();
     };
-    // Capture phase: panel must win against drawer's Esc handler.
     window.addEventListener('keydown', handler, true);
     return () => window.removeEventListener('keydown', handler, true);
-  }, [onClose]);
-
-  useEffect(() => {
-    let cancelled = false;
-    setState({ kind: 'loading' });
-    request<{ status: 'ready' | 'pending' | 'failed'; deepSummary: string | null }>(
-      'trading.news.deepSummary',
-      { articleId: article.id },
-    )
-      .then((res) => {
-        if (cancelled) return;
-        if (res.status === 'ready' && res.deepSummary) {
-          setState({ kind: 'ready', deepSummary: res.deepSummary });
-        } else {
-          setState({ kind: 'failed' });
-        }
-      })
-      .catch(() => {
-        if (!cancelled) setState({ kind: 'failed' });
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [article.id, request]);
+  }, [onClose, view]);
 
   const sourceName = SOURCE_NAMES[article.sourceId] ?? article.sourceId;
   const publishedDate = new Date(article.publishedAt * 1000).toLocaleDateString(undefined, {
     year: 'numeric', month: 'short', day: 'numeric',
   });
-  const fallbackSummary = stripLegacyLabels(
-    (article.fullSummary ?? '').replace(/^\[partial\]/, ''),
-  );
-  const leadParagraph = article.snippet.length > 200
-    ? article.snippet.slice(0, 200).trimEnd() + '…'
-    : article.snippet;
+
+  const bodyText = article.body && article.body.length > 0 ? article.body : null;
+  const hasBody = bodyText !== null;
+  // Legacy rows (pre-migration v11) have body=null but a cron-generated summary
+  // already cached. Render it inline without the toggle — there's nothing to
+  // switch to.
+  const legacySummary = !hasBody && article.summary && article.summary.length > 0 ? article.summary : null;
+  const fallbackText = !hasBody && !legacySummary && article.description.length > 0 ? article.description : null;
+
+  const requestSummary = useCallback(async () => {
+    setView('summary');
+    // No-op if a result is cached or a fetch is already in flight.
+    if (summary.kind === 'ready' || summary.kind === 'loading') return;
+    const token = reqTokenRef.current;
+    setSummary({ kind: 'loading' });
+    try {
+      const res = await request<{ ok: boolean; summary?: string; cached?: boolean; error?: string }>(
+        'trading.news.summarize',
+        { articleId: article.id },
+      );
+      if (token !== reqTokenRef.current) return;
+      if (res.ok && res.summary) {
+        setSummary({ kind: 'ready', summary: res.summary, cached: Boolean(res.cached) });
+      } else {
+        setSummary({ kind: 'failed', error: res.error ?? 'Failed to generate summary' });
+      }
+    } catch {
+      if (token !== reqTokenRef.current) return;
+      setSummary({ kind: 'failed', error: 'Network error' });
+    }
+  }, [article.id, request, summary.kind]);
 
   return createPortal(
     <aside
@@ -95,98 +105,94 @@ export function NewsArticlePanel({ article, compact, onClose }: NewsArticlePanel
         (compact ? 'right-0' : 'right-[408px]')
       }
     >
-      {/* Scroll container fills the panel width so the scrollbar sits at
-          the panel's right edge instead of floating mid-panel beside the
-          centered content column. Inner column keeps the 725px cap. */}
       <div className="flex-1 overflow-y-auto w-full">
         <div className="py-4 px-6 flex flex-col items-end gap-[19px] w-[725px] mx-auto">
-        {/* Top row: source meta · Summary-by-AI badge.
-            Figma 1091:4908 moves the "Summary by AI" tag to the top-right;
-            the "Read full" affordance migrates to the bottom of the panel
-            as a button. */}
-        <div className="flex items-center justify-between w-full">
-          <div className="flex items-center gap-2 min-w-0">
-            <span
-              className="inline-flex items-center justify-center rounded-full border bg-[#0f1012] shrink-0 overflow-hidden"
-              style={{ width: 32, height: 32, borderColor: 'rgba(122,129,128,0.3)' }}
-            >
-              <Avatar
-                url={sourceLogoUrl(article.sourceId)}
-                seed={article.sourceId}
-                label={sourceName}
-                size={24}
+          <div className="flex items-center justify-between w-full">
+            <div className="flex items-center gap-2 min-w-0">
+              <span
+                className="inline-flex items-center justify-center rounded-full border bg-[#0f1012] shrink-0 overflow-hidden"
+                style={{ width: 32, height: 32, borderColor: 'rgba(122,129,128,0.3)' }}
+              >
+                <Avatar
+                  url={sourceLogoUrl(article.sourceId)}
+                  seed={article.sourceId}
+                  label={sourceName}
+                  size={24}
+                />
+              </span>
+              <div className="flex flex-col min-w-0">
+                <span className="text-label-lg text-text-primary leading-[1.5] truncate">
+                  {sourceName}
+                </span>
+                <span className="text-body-sm text-text-secondary leading-[1.5]">
+                  {timeAgo(article.publishedAt)}
+                </span>
+              </div>
+            </div>
+            {hasBody ? (
+              <ViewToggle
+                view={view}
+                onShowBody={() => setView('body')}
+                onShowSummary={requestSummary}
               />
-            </span>
-            <div className="flex flex-col min-w-0">
-              <span className="text-label-lg text-text-primary leading-[1.5] truncate">
+            ) : legacySummary ? (
+              <span className="inline-flex items-center gap-1.5 text-body-sm text-text-secondary leading-[1.5]">
+                <SparklesIcon className="text-[var(--color-brand-default)]" />
+                Summary by AI
+              </span>
+            ) : null}
+          </div>
+
+          <div className="flex flex-col items-start gap-2 w-full">
+            <h1 className="text-heading-md text-text-primary leading-[1.5] m-0">{article.title}</h1>
+            <div className="text-body-md text-text-secondary leading-[1.5]">
+              <a
+                href={article.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-text-secondary underline hover:text-text-primary"
+              >
                 {sourceName}
-              </span>
-              <span className="text-body-sm text-text-secondary leading-[1.5]">
-                {timeAgo(article.publishedAt)}
-              </span>
+              </a>
+              {' · Published '}
+              {publishedDate}
             </div>
           </div>
-          <span className="inline-flex items-center gap-2 py-[2px] rounded-[6px]">
-            <SparklesIcon />
-            <span className="text-body-sm text-text-tertiary leading-[1.5] whitespace-nowrap">
-              Summary by AI
-            </span>
-          </span>
-        </div>
 
-        <div className="flex flex-col items-start gap-2 w-full">
-          {/* Title — 22px semibold (heading-md) */}
-          <h1 className="text-heading-md text-text-primary leading-[1.5] m-0">{article.title}</h1>
-
-          {/* Meta line */}
-          <div className="text-body-md text-text-secondary leading-[1.5]">
-            <a
-              href={article.url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-text-secondary underline hover:text-text-primary"
-            >
-              {sourceName}
-            </a>
-            {' · Published '}
-            {publishedDate}
-          </div>
-
-          {/* Lead paragraph — 16px (body-lg) per Figma */}
-          {leadParagraph && (
-            <p className="text-body-lg text-text-primary leading-[1.5] m-0">{leadParagraph}</p>
+          {article.imageUrl && (!hasBody || view === 'body') && (
+            <img
+              src={article.imageUrl}
+              alt=""
+              loading="lazy"
+              className="w-full aspect-[1920/1080] object-cover rounded-[2px]"
+            />
           )}
-        </div>
 
-        {/* Main image — full panel width per Figma */}
-        {article.imageUrl && (
-          <img
-            src={article.imageUrl}
-            alt=""
-            loading="lazy"
-            className="w-full aspect-[1920/1080] object-cover rounded-[2px]"
-          />
-        )}
+          {hasBody ? (
+            view === 'body' ? (
+              <ArticleBody body={bodyText} fallback={null} />
+            ) : (
+              <SummaryView state={summary} onRetry={requestSummary} />
+            )
+          ) : (
+            <LegacyContent summary={legacySummary} fallback={fallbackText} />
+          )}
 
-        {/* Deep summary body (3-state) */}
-        <DeepSummaryBody state={state} fallbackSummary={fallbackSummary} />
-
-        {/* Read-full-article button — bottom-aligned per Figma 1091:4901 */}
-        <a
-          href={article.url}
-          target="_blank"
-          rel="noopener noreferrer"
-          className={
-            'inline-flex items-center justify-center gap-1.5 h-9 px-3 rounded-[4px] ' +
-            'bg-[var(--color-surface-overlay)] border border-[var(--color-border-strong)] ' +
-            'text-body-md-medium text-text-secondary no-underline cursor-pointer ' +
-            'transition-colors duration-fast ease-out btn-press ' +
-            'hover:text-text-primary hover:border-[var(--color-text-tertiary)]'
-          }
-        >
-          Read full article
-          <ArrowUpRightIcon />
-        </a>
+          <a
+            href={article.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className={
+              'inline-flex items-center justify-center gap-1.5 h-9 px-3 rounded-[4px] ' +
+              'bg-[var(--color-surface-overlay)] border border-[var(--color-border-strong)] ' +
+              'text-body-md-medium text-text-secondary no-underline cursor-pointer ' +
+              'transition-colors duration-fast ease-out btn-press ' +
+              'hover:text-text-primary hover:border-[var(--color-text-tertiary)]'
+            }
+          >
+            View original
+            <ArrowUpRightIcon />
+          </a>
         </div>
       </div>
     </aside>,
@@ -194,57 +200,136 @@ export function NewsArticlePanel({ article, compact, onClose }: NewsArticlePanel
   );
 }
 
-function ArrowUpRightIcon() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <path d="M5 11L11 5M11 5H6M11 5V10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-function SparklesIcon() {
-  return (
-    <svg width="17" height="17" viewBox="0 0 17 17" fill="none" aria-hidden="true">
-      <path
-        d="M8.5 2L9.7 5.8L13.5 7L9.7 8.2L8.5 12L7.3 8.2L3.5 7L7.3 5.8L8.5 2Z"
-        fill="currentColor"
-        className="text-text-tertiary"
-      />
-      <path
-        d="M13.5 10L14 11.5L15.5 12L14 12.5L13.5 14L13 12.5L11.5 12L13 11.5L13.5 10Z"
-        fill="currentColor"
-        className="text-text-tertiary"
-      />
-    </svg>
-  );
-}
-
-function DeepSummaryBody({
-  state,
-  fallbackSummary,
+function ViewToggle({
+  view, onShowBody, onShowSummary,
 }: {
-  state: PanelState;
-  fallbackSummary: string;
+  view: View;
+  onShowBody: () => void;
+  onShowSummary: () => void;
 }) {
-  if (state.kind === 'loading') {
+  return (
+    <div
+      role="tablist"
+      aria-label="Article view"
+      className="inline-flex items-center gap-0.5 p-0.5 rounded-[6px] bg-[var(--color-surface-overlay)] border border-[var(--color-border-subtle)]"
+    >
+      <button
+        type="button"
+        role="tab"
+        aria-selected={view === 'body'}
+        onClick={onShowBody}
+        className={
+          'inline-flex items-center gap-1.5 h-7 px-3 rounded-[4px] border-0 cursor-pointer ' +
+          'text-body-sm-medium transition-colors duration-fast ease-out btn-press ' +
+          (view === 'body'
+            ? 'bg-[var(--color-surface-raised)] text-text-primary'
+            : 'bg-transparent text-text-secondary hover:text-text-primary')
+        }
+      >
+        Article
+      </button>
+      <button
+        type="button"
+        role="tab"
+        aria-selected={view === 'summary'}
+        onClick={onShowSummary}
+        title="Generate AI summary"
+        className={
+          'inline-flex items-center gap-1.5 h-7 px-3 rounded-[4px] border-0 cursor-pointer ' +
+          'text-body-sm-medium transition-colors duration-fast ease-out btn-press ' +
+          (view === 'summary'
+            ? 'bg-[var(--color-surface-raised)] text-text-primary'
+            : 'bg-transparent text-text-secondary hover:text-text-primary')
+        }
+      >
+        <SparklesIcon className="text-[var(--color-brand-default)]" />
+        AI Summary
+      </button>
+    </div>
+  );
+}
+
+function ArticleBody({ body, fallback }: { body: string | null; fallback: string | null }) {
+  if (body) {
+    // Backend sanitizes the body (allowlist tags/attrs, https URLs, target=_blank).
+    return <div className="article-html w-full" dangerouslySetInnerHTML={{ __html: body }} />;
+  }
+
+  if (fallback) {
     return (
-      <div className="flex items-center gap-2 text-body-sm text-text-secondary leading-[1.5]">
-        <span>Generating summary</span>
-        <PulsingDots color={NEWS_PINK} />
+      <div className="flex flex-col gap-2 w-full">
+        <p className="text-body-lg text-text-primary leading-[1.5] m-0 whitespace-pre-wrap">
+          {fallback}
+        </p>
+        <p className="text-footnote text-text-tertiary leading-[1.5] m-0 italic">
+          Full article body unavailable — view original for the full story.
+        </p>
+      </div>
+    );
+  }
+
+  return null;
+}
+
+// Pre-v11 articles never had `body` fetched, but the old cron already
+// populated `summary`. Render that cached summary inline with no toggle —
+// matches the panel's behaviour before the on-demand summarize PR landed.
+function LegacyContent({ summary, fallback }: { summary: string | null; fallback: string | null }) {
+  if (summary) {
+    const paragraphs = splitParagraphs(summary);
+    return (
+      <div className="flex flex-col gap-3 w-full">
+        {paragraphs.map((para, i) => (
+          <p key={i} className="text-body-lg text-text-primary leading-[1.5] m-0">
+            {para}
+          </p>
+        ))}
+      </div>
+    );
+  }
+  if (fallback) {
+    return (
+      <div className="flex flex-col gap-2 w-full">
+        <p className="text-body-lg text-text-primary leading-[1.5] m-0 whitespace-pre-wrap">
+          {fallback}
+        </p>
+        <p className="text-footnote text-text-tertiary leading-[1.5] m-0 italic">
+          Full article body unavailable — view original for the full story.
+        </p>
+      </div>
+    );
+  }
+  return null;
+}
+
+function SummaryView({ state, onRetry }: { state: SummaryState; onRetry: () => void }) {
+  if (state.kind === 'loading' || state.kind === 'idle') {
+    return (
+      <div className="w-full min-h-[180px] flex flex-col items-center justify-center gap-3">
+        <PulsingDots />
+        <span className="text-body-sm text-text-tertiary leading-[1.5]">Generating AI summary…</span>
       </div>
     );
   }
 
   if (state.kind === 'failed') {
-    if (!fallbackSummary) return null;
     return (
-      <p className="text-body-lg text-text-primary leading-[1.5] m-0 whitespace-pre-wrap w-full">
-        {fallbackSummary}
-      </p>
+      <div className="w-full flex flex-col items-start gap-2">
+        <p className="text-body-md text-[var(--color-error-default)] leading-[1.5] m-0">
+          {state.error}
+        </p>
+        <button
+          type="button"
+          onClick={onRetry}
+          className="text-body-sm text-text-secondary underline hover:text-text-primary cursor-pointer bg-transparent border-0 p-0"
+        >
+          Try again
+        </button>
+      </div>
     );
   }
 
-  const paragraphs = splitParagraphs(state.deepSummary);
+  const paragraphs = splitParagraphs(state.summary);
   return (
     <div className="flex flex-col gap-3 w-full">
       {paragraphs.map((para, i) => (
@@ -256,7 +341,30 @@ function DeepSummaryBody({
   );
 }
 
-/** Split a deep summary blob into paragraphs.
+function ArrowUpRightIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M5 11L11 5M11 5H6M11 5V10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function SparklesIcon({ className }: { className?: string }) {
+  return (
+    <svg width="14" height="14" viewBox="0 0 17 17" fill="none" aria-hidden="true" className={className}>
+      <path
+        d="M8.5 2L9.7 5.8L13.5 7L9.7 8.2L8.5 12L7.3 8.2L3.5 7L7.3 5.8L8.5 2Z"
+        fill="currentColor"
+      />
+      <path
+        d="M13.5 10L14 11.5L15.5 12L14 12.5L13.5 14L13 12.5L11.5 12L13 11.5L13.5 10Z"
+        fill="currentColor"
+      />
+    </svg>
+  );
+}
+
+/** Split a body or summary blob into paragraphs.
  *  Primary split: blank lines. Fallback: group sentences into ~3-sentence
  *  paragraphs so a single-blob response is still readable. */
 function splitParagraphs(text: string): string[] {

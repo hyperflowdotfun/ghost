@@ -39,6 +39,7 @@ import {
   validateTimezone,
   createTimezoneService,
 } from "../services/timezone.js";
+import { TIMEZONES, findTimezoneById, formatUtcOffset } from "../services/timezones-data.js";
 import { PreferenceStore } from "../services/preferences.js";
 import { initDatabase } from "../core/database.js";
 import { runDbMigrations } from "../core/migrations/db.js";
@@ -609,50 +610,43 @@ export async function runWizard(daemonOptions: WizardOptions): Promise<void> {
 }
 
 /**
- * All IANA timezones supported by the runtime, sorted alphabetically.
- * Returns [] when Intl.supportedValuesOf is unavailable (caller falls back
- * to a text-input prompt).
+ * Resolve a detected IANA tz to a row in the curated TIMEZONES list.
+ *
+ * Direct id match first; otherwise compare live UTC offsets so e.g.
+ * "Asia/Ho_Chi_Minh" (not in the Windows list) lands on the first row
+ * sharing its current offset — "(UTC+07:00) Bangkok, Hanoi, Jakarta".
+ * No hardcoded aliases — offset is computed at runtime, so DST and
+ * future zone splits are handled correctly.
  */
-function listSupportedTimezones(): string[] {
-  const fn = (Intl as unknown as { supportedValuesOf?: (k: string) => string[] }).supportedValuesOf;
-  if (typeof fn !== "function") return [];
-  return [...fn("timeZone")].sort();
+function resolveDetectedToEntry(detected: string): string {
+  if (findTimezoneById(detected)) return detected;
+  const detectedOffset = formatUtcOffset(detected);
+  const match = TIMEZONES.find((t) => formatUtcOffset(t.id) === detectedOffset);
+  return match?.id ?? "Etc/UTC";
 }
 
 /**
- * Interactive TZ prompt — single scrollable select of all IANA timezones,
- * with the detected host TZ pre-selected so Enter accepts the default.
+ * Interactive TZ prompt — Windows-curated list shown as
+ * "(UTC+07:00) Bangkok, Hanoi, Jakarta" with autocomplete filter.
+ * Detected host TZ is pre-selected when it maps to an entry.
  */
 async function promptTimezone(): Promise<string> {
   const detected = detectHostTimezone();
-  const allZones = listSupportedTimezones();
+  const initialValue = resolveDetectedToEntry(detected);
 
-  // Runtime missing Intl.supportedValuesOf — fall back to free-text prompt.
-  if (allZones.length === 0) {
-    const entered = await text({
-      message: "Step 5/5 — IANA timezone (e.g. America/New_York):",
-      initialValue: detected,
-      validate(value) {
-        const v = validateTimezone(value);
-        return v.ok ? undefined : v.error;
-      },
-    });
-    if (isCancel(entered)) { cancel("Setup cancelled."); process.exit(0); }
-    const result = validateTimezone(entered as string);
-    return result.ok ? result.tz : detected;
-  }
-
-  const initialValue = allZones.includes(detected) ? detected : allZones[0]!;
   const choice = await autocomplete({
     message: "Step 5/5 — Select your timezone (type to filter)",
-    placeholder: "e.g. berlin, new_york, utc",
-    options: allZones.map((tz) => ({
-      value: tz,
-      label: tz === detected ? `${tz} (detected)` : tz,
+    placeholder: "e.g. bangkok, london, new york",
+    options: TIMEZONES.map((tz) => ({
+      value: tz.id,
+      label: tz.id === initialValue ? `${tz.label} (detected)` : tz.label,
     })),
     initialValue,
     maxItems: 10,
   });
   if (isCancel(choice)) { cancel("Setup cancelled."); process.exit(0); }
-  return choice as string;
+
+  // Defensive: validate via Intl to confirm the runtime accepts the id.
+  const v = validateTimezone(choice as string);
+  return v.ok ? v.tz : initialValue;
 }

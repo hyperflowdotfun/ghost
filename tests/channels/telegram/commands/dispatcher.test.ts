@@ -74,13 +74,13 @@ async function mkChannel(opts: {
     },
     newsService: {
       getArticles: () => [
-        makeArticle({ title: "Hello", url: "https://x/y", snippet: "A great summary." }),
+        makeArticle({ title: "Hello", url: "https://x/y", description: "A great summary." }),
       ],
       // Drain-mode path (default /news) — return the same fixture so the
       // formatter pipeline runs end-to-end regardless of which mode the
       // dispatcher test exercises.
       getUnshownArticles: () => [
-        makeArticle({ title: "Hello", url: "https://x/y", snippet: "A great summary." }),
+        makeArticle({ title: "Hello", url: "https://x/y", description: "A great summary." }),
       ],
       markArticlesShown: () => {},
       getSourceNames: () => new Map<string, string>(),

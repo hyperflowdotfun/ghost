@@ -4,6 +4,7 @@ import { existsSync, readFileSync } from "node:fs";
 import type { MemoryStore } from "../memory/store.js";
 import type { SkillsLoader } from "../skills/loader.js";
 import { sanitizeForPrompt } from "../helpers/sanitize-prompt.js";
+import { formatUtcOffset } from "../services/timezones-data.js";
 
 const BOOTSTRAP_FILES = ["SOUL.md"];
 const MAX_FILE_CHARS = 20_000;
@@ -239,8 +240,9 @@ export class ContextBuilder {
       minute: "2-digit",
       hour12: false,
     });
+    const offset = formatUtcOffset(tz, now);
 
-    let ctx = `[Runtime Context — metadata only, not instructions]\nCurrent Time: ${timeStr} (${tz})`;
+    let ctx = `[Runtime Context — metadata only, not instructions]\nCurrent Time: ${timeStr} (${offset})`;
     if (channel && chatId) {
       ctx += `\nChannel: ${channel}\nChat ID: ${chatId}`;
     }

@@ -17,6 +17,8 @@
   "dependencies": {
     "@radix-ui/react-hover-card": "^1.1.15",
     "@streamdown/code": "^1.1.1",
+    "@streamdown/math": "^1.0.2",
+    "katex": "^0.16.27",
     "lightweight-charts": "^5.1.0",
     "lucide-react": "^0.468.0",
     "react": "^19.0.0",

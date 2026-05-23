@@ -71,6 +71,7 @@ function makeDeps(tradingClient: ITradingClient, priceCache: PriceCache) {
     logger: noopLogger,
     tokensSnapshot: new TokensSnapshotService(tradingClient, priceCache),
     priceCache,
+    runner: { call: async () => "" } as any,
   };
 }
 
