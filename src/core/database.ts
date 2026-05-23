@@ -41,13 +41,6 @@ export function initDatabase(dbPath: string): Database {
     )
   `);
 
-  // ---------------------------------------------------------------------------
-  // Cron tables
-  // ---------------------------------------------------------------------------
-
-  // cron_jobs, cron_runs, audit_log tables removed (Epic 34)
-  // Cron now uses JSON files (CronService). Audit removed.
-
   db.run(`
     CREATE TABLE IF NOT EXISTS cost_records (
       id            INTEGER PRIMARY KEY AUTOINCREMENT,

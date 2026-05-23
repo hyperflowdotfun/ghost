@@ -102,7 +102,6 @@ export class SystemdController implements ServiceController {
       description: "Ghost AI Trading Companion",
       execStart: `${opts.bunPath} ${opts.execPath} daemon`,
       workingDir: join(homedir(), ".ghost"),
-      logFile: join(opts.logDir, "ghost.log"),
       env: {
         ...opts.env,
         GHOST_LOG_DIR: opts.logDir,

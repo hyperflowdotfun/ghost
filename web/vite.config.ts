@@ -10,6 +10,10 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
+      // Shared data shipped to both server and web. Single source of truth
+      // lives under ../src/services so cron-parser + TimezoneService keep
+      // using it directly; web imports the same file via this alias.
+      "@shared/timezones-data": path.resolve(__dirname, "../src/services/timezones-data.ts"),
     },
   },
   build: {

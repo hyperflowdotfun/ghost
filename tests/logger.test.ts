@@ -1,27 +1,50 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createRootLogger } from "../src/logger.js";
 
+// Redirect HOME to an isolated tmp dir so the pino-roll factory in
+// createRootLogger writes into the tmp dir instead of the user's real
+// ~/.ghost/logs/. defaultLogDir() resolves HOME at call time, so this
+// override propagates into every createRootLogger() call below.
+
+let tmpHome: string;
+let originalHome: string | undefined;
+
+beforeAll(() => {
+  tmpHome = mkdtempSync(join(tmpdir(), "ghost-logger-test-"));
+  originalHome = process.env.HOME;
+  process.env.HOME = tmpHome;
+});
+
+afterAll(() => {
+  if (originalHome === undefined) delete process.env.HOME;
+  else process.env.HOME = originalHome;
+  rmSync(tmpHome, { recursive: true, force: true });
+});
+
 describe("createRootLogger", () => {
-  test("default verbosity 0 sets level to info", () => {
-    const logger = createRootLogger(0);
+  test("default verbosity 0 sets level to info", async () => {
+    const logger = await createRootLogger(0);
     expect(logger.level).toBe("info");
   });
 
-  test("verbosity 1 sets level to debug", () => {
-    const logger = createRootLogger(1);
+  test("verbosity 1 sets level to debug", async () => {
+    const logger = await createRootLogger(1);
     expect(logger.level).toBe("debug");
   });
 
-  test("verbosity 2 sets level to trace", () => {
-    const logger = createRootLogger(2);
+  test("verbosity 2 sets level to trace", async () => {
+    const logger = await createRootLogger(2);
     expect(logger.level).toBe("trace");
   });
 
-  test("LOG_LEVEL env var overrides default when verbosity is 0", () => {
+  test("LOG_LEVEL env var overrides default when verbosity is 0", async () => {
     const original = process.env.LOG_LEVEL;
     process.env.LOG_LEVEL = "warn";
     try {
-      const logger = createRootLogger(0);
+      const logger = await createRootLogger(0);
       expect(logger.level).toBe("warn");
     } finally {
       if (original === undefined) delete process.env.LOG_LEVEL;
@@ -29,11 +52,11 @@ describe("createRootLogger", () => {
     }
   });
 
-  test("verbosity flag takes precedence over LOG_LEVEL", () => {
+  test("verbosity flag takes precedence over LOG_LEVEL", async () => {
     const original = process.env.LOG_LEVEL;
     process.env.LOG_LEVEL = "warn";
     try {
-      const logger = createRootLogger(1);
+      const logger = await createRootLogger(1);
       expect(logger.level).toBe("debug");
     } finally {
       if (original === undefined) delete process.env.LOG_LEVEL;
@@ -41,11 +64,11 @@ describe("createRootLogger", () => {
     }
   });
 
-  test("invalid LOG_LEVEL falls back to info", () => {
+  test("invalid LOG_LEVEL falls back to info", async () => {
     const original = process.env.LOG_LEVEL;
     process.env.LOG_LEVEL = "banana";
     try {
-      const logger = createRootLogger(0);
+      const logger = await createRootLogger(0);
       expect(logger.level).toBe("info");
     } finally {
       if (original === undefined) delete process.env.LOG_LEVEL;
@@ -53,20 +76,10 @@ describe("createRootLogger", () => {
     }
   });
 
-  test("child logger inherits level and adds module field", () => {
-    const root = createRootLogger(0);
+  test("child logger inherits level and adds module field", async () => {
+    const root = await createRootLogger(0);
     const child = root.child({ module: "news" });
     expect(child.level).toBe("info");
     expect((child as unknown as { bindings: () => Record<string, unknown> }).bindings().module).toBe("news");
   });
 });
-
-describe("createRootLogger — stdout only", () => {
-  // After the earlier revert, pino writes to stdout only. The OS service
-  // supervisor (launchd StandardOutPath / schtasks `>>` / systemd
-  // StandardOutput=append:) owns the log file.
-  test("does not throw when called with verbosity only", () => {
-    expect(() => createRootLogger(0)).not.toThrow();
-  });
-});
-

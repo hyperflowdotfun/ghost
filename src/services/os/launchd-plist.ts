@@ -7,8 +7,6 @@ export interface PlistOptions {
   /** Absolute path to the ghost script. */
   execPath: string;
   workingDir: string;
-  stdoutLog: string;
-  stderrLog: string;
   env: Record<string, string>;
 }
 
@@ -58,11 +56,7 @@ export function buildPlist(opts: PlistOptions): string {
     <array>${argsXml}
     </array>
     <key>WorkingDirectory</key>
-    <string>${escapeXml(opts.workingDir)}</string>
-    <key>StandardOutPath</key>
-    <string>${escapeXml(opts.stdoutLog)}</string>
-    <key>StandardErrorPath</key>
-    <string>${escapeXml(opts.stderrLog)}</string>${envXml}
+    <string>${escapeXml(opts.workingDir)}</string>${envXml}
   </dict>
 </plist>
 `;

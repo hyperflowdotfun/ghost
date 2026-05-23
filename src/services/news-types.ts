@@ -12,15 +12,15 @@ export interface NewsArticle {
   externalId: string;
   url: string;
   title: string;
-  snippet: string;
+  description: string;
   imageUrl: string | null;
   coins: string[];
   importance: Importance;
   publishedAt: number;
   fetchedAt: number;
   expiresAt: number;
-  fullSummary: string | null;
-  detailedSummary: string | null;
+  body: string | null;
+  summary: string | null;
   aiRelevant: boolean | null;
   aiDuplicateOf: string | null;
 }

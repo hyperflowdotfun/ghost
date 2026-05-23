@@ -13,8 +13,10 @@ import type { WatchlistService } from "../services/watchlist.js";
 import type { Logger } from "pino";
 import type { TokensSnapshotService } from "../services/tokens-snapshot.js";
 import type { PriceCache } from "../services/price-cache.js";
+import type { Runner } from "../agent/runner.js";
 import { DEFAULT_NEWS_FILTER_INSTRUCTION } from "../daemon/prompts/news-evaluation.js";
 import { DEFAULT_TWEET_FILTER_INSTRUCTION } from "../daemon/prompts/tweet-evaluation.js";
+import { NEWS_DEEPSUMMARY_SYSTEM, buildDeepSummaryPrompt } from "../daemon/prompts/news-deepsummary.js";
 
 const FILTER_PROMPT_MAX = 2000;
 
@@ -34,6 +36,8 @@ interface TradingDeps {
   tokensSnapshot: TokensSnapshotService;
   /** Price cache — serves trading.price from in-memory state; falls back to HL on cold miss. */
   priceCache: PriceCache;
+  /** Shared taskAgent runner — used by on-demand LLM endpoints (e.g. news.summarize). */
+  runner: Runner;
 }
 
 export function registerTradingMethods(
@@ -612,5 +616,67 @@ export function registerTradingMethods(
     }
     deps.preferenceStore.setTweetFilterPrompt(trimmed);
     return { ok: true };
+  });
+
+  register("trading.news.filter.enabled.get", async () => {
+    return { enabled: deps.preferenceStore.getNewsFilterEnabled() };
+  });
+
+  register("trading.news.filter.enabled.set", async (_ctx, payload) => {
+    const p = payload as { enabled?: unknown };
+    if (typeof p?.enabled !== "boolean") return { ok: false, error: "Missing enabled flag" };
+    deps.preferenceStore.setNewsFilterEnabled(p.enabled);
+    return { ok: true };
+  });
+
+  register("trading.tweets.filter.enabled.get", async () => {
+    return { enabled: deps.preferenceStore.getTweetFilterEnabled() };
+  });
+
+  register("trading.tweets.filter.enabled.set", async (_ctx, payload) => {
+    const p = payload as { enabled?: unknown };
+    if (typeof p?.enabled !== "boolean") return { ok: false, error: "Missing enabled flag" };
+    deps.preferenceStore.setTweetFilterEnabled(p.enabled);
+    return { ok: true };
+  });
+
+  register("trading.news.summarize", async (_ctx, payload) => {
+    const p = payload as { articleId?: unknown };
+    if (typeof p?.articleId !== "string" || p.articleId.length === 0) {
+      return { ok: false, error: "Missing articleId" };
+    }
+    const article = deps.newsService.getArticle(p.articleId);
+    if (!article) return { ok: false, error: "Article not found" };
+
+    if (article.summary && article.summary.length > 0) {
+      return { ok: true, summary: article.summary, cached: true };
+    }
+
+    const body = article.body;
+    if (!body || body.length < 100) {
+      return { ok: false, error: "Article body unavailable" };
+    }
+
+    // Body may be HTML — strip tags to plain text for the LLM prompt.
+    const plain = body.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+    if (plain.length < 100) return { ok: false, error: "Article body unavailable" };
+
+    let raw: string;
+    try {
+      raw = await deps.runner.call({
+        systemPrompt: NEWS_DEEPSUMMARY_SYSTEM,
+        message: buildDeepSummaryPrompt(article.title, plain),
+      });
+    } catch (err) {
+      log.warn({ err, articleId: article.id }, "news.summarize LLM call failed");
+      return { ok: false, error: "Summarize failed" };
+    }
+
+    const summary = raw.trim();
+    if (summary.length === 0) {
+      return { ok: false, error: "Summarize returned empty text" };
+    }
+    deps.newsService.saveSummary(article.id, summary);
+    return { ok: true, summary, cached: false };
   });
 }

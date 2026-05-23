@@ -19,8 +19,9 @@
     "noUncheckedSideEffectImports": true,
     "baseUrl": ".",
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["./src/*"],
+      "@shared/timezones-data": ["../src/services/timezones-data.ts"]
     }
   },
-  "include": ["src"]
+  "include": ["src", "../src/services/timezones-data.ts"]
 }

@@ -498,7 +498,7 @@ async function buildEvalStack(
   }
   const runtime = await createRuntime({
     paper: paperSchema.parse({ enabled: true, initialBalance: paperBalance }),
-    logger: createRootLogger(0),
+    logger: await createRootLogger(0),
     confirmServiceOverride: {
       async confirm() { return { decision: "approved" as const }; },
     },
@@ -548,7 +548,6 @@ const RUNTIME_ACCUMULATION_PATHS: readonly string[] = [
   "workspace/paper-trading.db-wal",
   "workspace/MEMORY.md",
   "workspace/HISTORY.md",
-  "workspace/cron",
   "workspace/sessions",
 ];
 

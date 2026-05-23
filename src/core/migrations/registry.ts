@@ -230,6 +230,17 @@ const addCronJobsMigration: Migration<Database> = {
   },
 };
 
+const reshapeArticlesMigration: Migration<Database> = {
+  version: 11,
+  label: "article_schema_cleanup",
+  up: (db) => {
+    db.run(`ALTER TABLE articles RENAME COLUMN snippet TO description`);
+    db.run(`ALTER TABLE articles RENAME COLUMN full_summary TO summary`);
+    db.run(`ALTER TABLE articles DROP COLUMN detailed_summary`);
+    db.run(`ALTER TABLE articles ADD COLUMN body TEXT`);
+  },
+};
+
 export const DB_MIGRATIONS: ReadonlyArray<Migration<Database>> = [
   baselineDbMigration,
   proactiveCooldownsMigration,
@@ -241,6 +252,7 @@ export const DB_MIGRATIONS: ReadonlyArray<Migration<Database>> = [
   splitAlertsMigration,
   addXFollowsEnabledSourceMigration,
   addCronJobsMigration,
+  reshapeArticlesMigration,
 ];
 
 // ---------------------------------------------------------------------------

@@ -12,6 +12,10 @@ import type {
   ServiceStatus,
 } from "./controller.js";
 import { ensureLogDir, defaultLogDir } from "./utils.js";
+import {
+  EXIT_UNCAUGHT_EXCEPTION,
+  EXIT_UNHANDLED_REJECTION,
+} from "../../helpers/exit-codes.js";
 
 const TASK_NAME = "Ghost";
 
@@ -125,12 +129,12 @@ function xmlEscape(value: string): string {
  * embeds the bun runtime + JS entry. Running `bun ghost.exe` would parse the
  * PE binary as JavaScript and crash with "Expected ';'" on the MZ header.
  *
- * stdout/stderr are merged into a single ghost.log via `1>>"%GHOST_LOG%" 2>&1`.
- * When the launcher runs under a detached spawn with `stdio: "ignore"`, the
- * daemon inherits null stdio handles and dies the first time it writes (logger
- * banner, pino, etc.). Redirecting at the cmd.exe level opens real file
- * handles before ghost.exe starts, so it has somewhere to write regardless
- * of how the launcher was invoked.
+ * stdout/stderr are not redirected here. The in-process rotating logger owns
+ * the structured log files under `~/.ghost/logs/`. Detached scheduled
+ * tasks drop any residual stdout/stderr to NUL by default — no file-locking
+ * conflicts with the logger's file handles. A
+ * pre-flush crash (before logger init) will not appear in any file — use
+ * Event Viewer or run `ghost daemon` from a CMD window to capture it.
  *
  * The launcher is single-shot — cmd.exe exits as soon as ghost.exe exits.
  * This prevents cmd.exe from holding the .cmd file open with FILE_SHARE_READ
@@ -147,8 +151,6 @@ export function buildLauncherCmd(_bunPath: string, execPath: string, env?: Recor
   assertBatchSafePath("execPath", execPath);
 
   const ghostDir = join(homedir(), ".ghost");
-  const ghostLog = join(ghostDir, "logs", "ghost.log");
-  assertBatchSafePath("ghostLog", ghostLog);
 
   // Skip PATH — it can be thousands of characters and contain %VARS%,
   // which exceeds batch line limits and breaks variable expansion.
@@ -160,16 +162,13 @@ export function buildLauncherCmd(_bunPath: string, execPath: string, env?: Recor
     });
 
   // Trailing `exit /b %ERRORLEVEL%` propagates ghost.exe's non-zero status
-  // up to Task Scheduler so RestartOnFailure actually fires on crash. Without
-  // it, cmd.exe always exits 0 (last command was the redirect, not ghost.exe)
-  // and the task is treated as successful.
+  // up to Task Scheduler so RestartOnFailure actually fires on crash.
   return [
     "@echo off",
     "rem Ghost daemon launcher",
     `cd /d "${ghostDir}"`,
-    `set "GHOST_LOG=${ghostLog}"`,
     ...setLines,
-    `${quoteCmdArg(execPath)} daemon <nul 1>>"%GHOST_LOG%" 2>&1`,
+    `${quoteCmdArg(execPath)} daemon <nul`,
     "exit /b %ERRORLEVEL%",
     "",
   ].join("\r\n");
@@ -208,6 +207,7 @@ export function buildLauncherCmd(_bunPath: string, execPath: string, env?: Recor
 export function buildInvisibleVbs(launcherCmdPath: string): string {
   // VBScript string-literal escape: only `"` needs doubling.
   const escaped = launcherCmdPath.replace(/"/g, '""');
+  // Exit-code contract lives in src/helpers/exit-codes.ts — keep in sync.
   return [
     `' Ghost daemon — invisible launcher wrapper + crash-restart supervisor`,
     `' Style 0 = hidden window, wait = True so exit code propagates from the daemon.`,
@@ -216,10 +216,10 @@ export function buildInvisibleVbs(launcherCmdPath: string): string {
     `attempts = 0`,
     `Do`,
     `  exitCode = shell.Run("""${escaped}""", 0, True)`,
-    `  ' Only JS-level crash handlers (exit 100 / 101) request a respawn.`,
+    `  ' Only JS-level crash handlers (exit ${EXIT_UNCAUGHT_EXCEPTION} / ${EXIT_UNHANDLED_REJECTION}) request a respawn.`,
     `  ' Anything else — clean stop (0), external kill (1), config error,`,
     `  ' bun crash — is treated as the operator's intent. Respect it.`,
-    `  If exitCode <> 100 And exitCode <> 101 Then Exit Do`,
+    `  If exitCode <> ${EXIT_UNCAUGHT_EXCEPTION} And exitCode <> ${EXIT_UNHANDLED_REJECTION} Then Exit Do`,
     `  attempts = attempts + 1`,
     `  If attempts >= 5 Then Exit Do`,
     `  ' 5s back-off between restart attempts.`,
@@ -463,9 +463,8 @@ export class SchtasksController implements ServiceController {
     // End running task (swallow errors). `schtasks /End` terminates the
     // task's action root — wscript.exe — but does NOT cascade to descendant
     // processes. The ghost.exe child (spawned by the cmd launcher) remains
-    // alive and continues to hold ghost.log open via the
-    // `1>>"%GHOST_LOG%" 2>&1` redirect, which then blocks the rm -rf of
-    // ~/.ghost/logs that runs later in this method.
+    // alive and may still hold the log file open, which can block
+    // the rm -rf of ~/.ghost/logs that runs later in this method.
     schtasks(["/End", "/TN", TASK_NAME]);
 
     // Defence in depth: kill any orphaned launcher chain matching our

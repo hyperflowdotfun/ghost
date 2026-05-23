@@ -1,0 +1,2 @@
+export const EXIT_UNCAUGHT_EXCEPTION = 100;
+export const EXIT_UNHANDLED_REJECTION = 101;

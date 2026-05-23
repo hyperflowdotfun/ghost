@@ -1,6 +1,4 @@
 import { describe, test, expect } from "bun:test";
-import { homedir } from "node:os";
-import { join } from "node:path";
 import {
   buildLauncherCmd,
   buildInvisibleVbs,
@@ -30,18 +28,17 @@ describe("buildLauncherCmd", () => {
     expect(cmd).not.toContain(bunPath);
   });
 
-  test("redirects stdout and stderr to a single ghost.log file", () => {
-    // Detached spawn with stdio:ignore gives the child null handles — the
-    // daemon dies on first log write. Redirection inside the .cmd opens
-    // real file handles before ghost.exe runs.
-    // stdout → ghost.log; stderr merged via 2>&1 (order is critical).
+  test("does NOT redirect stdout/stderr — in-process logger owns the log file", () => {
+    // The cmd launcher no longer contains any stdout/stderr redirect.
+    // The in-process rotating logger opens ghost.log directly from the daemon
+    // process, avoiding FILE_SHARE_READ lock conflicts. Detached task drops
+    // residual stdout to NUL.
     const cmd = buildLauncherCmd("bun.exe", "C:\\ghost.exe");
-    expect(cmd).toContain("1>>");
-    expect(cmd).toContain("2>&1");
-    expect(cmd).toContain("ghost.log");
+    expect(cmd).not.toContain("1>>");
+    expect(cmd).not.toContain("2>&1");
+    expect(cmd).not.toContain("GHOST_LOG");
     expect(cmd).not.toContain("daemon.stdout.log");
     expect(cmd).not.toContain("daemon.stderr.log");
-    // No separate stderr redirect
     expect(cmd).not.toContain("2>>");
   });
 
@@ -66,7 +63,7 @@ describe("buildLauncherCmd", () => {
     expect(cmd).toContain('set "GHOST_LOG_DIR=C:\\Users\\test\\.ghost\\logs"');
   });
 
-  test("single-shot launcher: env passthrough, merged log redirect, no supervisor loop", () => {
+  test("single-shot launcher: env passthrough, NUL stdin, no redirect, no supervisor loop", () => {
     const cmd = buildLauncherCmd(
       "C:\\ignored\\bun.exe",
       "C:\\Users\\test\\.bun\\bin\\ghost.exe",
@@ -85,13 +82,15 @@ describe("buildLauncherCmd", () => {
 
     // `<nul` neutralises process.stdin.isTTY under schtasks-launched cmd.exe
     // so guardAgainstRunningService skips its interactive prompt.
-    expect(cmd).toContain("daemon <nul 1>>");
+    expect(cmd).toContain("daemon <nul");
 
-    // GHOST_LOG set line before the invocation.
-    expect(cmd).toContain(`set "GHOST_LOG=${join(homedir(), ".ghost", "logs", "ghost.log")}"`);
+    // No stdout/stderr redirect — in-process logger owns the log file.
+    expect(cmd).not.toContain("1>>");
+    expect(cmd).not.toContain("2>&1");
+    expect(cmd).not.toContain("GHOST_LOG");
 
-    // Daemon invocation with merged single-stream redirect via GHOST_LOG variable.
-    expect(cmd).toContain('"C:\\Users\\test\\.bun\\bin\\ghost.exe" daemon <nul 1>>"%GHOST_LOG%" 2>&1');
+    // Daemon invocation: just the executable + daemon + NUL stdin.
+    expect(cmd).toContain('"C:\\Users\\test\\.bun\\bin\\ghost.exe" daemon <nul');
 
     // Env passthrough.
     expect(cmd).toContain('set "FOO=bar"');

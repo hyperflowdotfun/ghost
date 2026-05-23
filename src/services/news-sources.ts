@@ -13,12 +13,12 @@ export interface RawArticle {
   externalId: string;
   url: string;
   title: string;
-  snippet: string;
+  description: string;
   imageUrl?: string;
   coins: string[];
   publishedAt: number;
   importanceSignal?: number;
-  /** Source-specific metadata (e.g. tweet stats). Stored as JSON in DB. */
+  body?: string | null;
   metadata?: Record<string, unknown>;
 }
 
@@ -80,7 +80,7 @@ export class CryptoPanicAdapter implements SourceAdapter {
         externalId: String(item.id),
         url: item.url,
         title: item.title,
-        snippet: item.body ?? "",
+        description: item.body ?? "",
         coins,
         publishedAt: item.published_at ? Math.floor(new Date(item.published_at).getTime() / 1000) : Math.floor(Date.now() / 1000),
         importanceSignal: item.votes?.important ?? 0,
@@ -171,7 +171,7 @@ export function parseRss(xml: string, sourceId: string): RawArticle[] {
       externalId: `${sourceId}:${link}`,
       url: link,
       title: stripHtml(title),
-      snippet: stripHtml(desc ?? "").slice(0, 3000),
+      description: stripHtml(desc ?? "").slice(0, 3000),
       imageUrl,
       coins: tagCoins(text),
       publishedAt: pubDate ? Math.floor(new Date(pubDate).getTime() / 1000) : Math.floor(Date.now() / 1000),
@@ -244,7 +244,7 @@ export class CoinGeckoAdapter implements SourceAdapter {
       externalId: item.id ?? item.url,
       url: item.url,
       title: item.title,
-      snippet: item.description ?? "",
+      description: item.description ?? "",
       imageUrl: item.thumb_2x,
       coins: tagCoins(`${item.title} ${item.description ?? ""}`),
       publishedAt: item.created_at ?? Math.floor(Date.now() / 1000),

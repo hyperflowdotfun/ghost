@@ -39,7 +39,7 @@ describe("LeakDetector — clean input", () => {
 // ---------------------------------------------------------------------------
 
 describe("LeakDetector — Stripe keys", () => {
-  // Concatenated prefixes so GitHub secret-scanning doesn't flag this file.
+  // Split prefixes via concat so GitHub secret scanner doesn't block this file.
   const SK_LIVE = "sk" + "_live";
   const SK_TEST = "sk" + "_test";
   const PK_LIVE = "pk" + "_live";
@@ -263,10 +263,10 @@ describe("LeakDetector — Generic secrets", () => {
 
 describe("LeakDetector — Multiple patterns", () => {
   test("detects multiple secrets in one string", () => {
-    const SK_LIVE = "sk" + "_live";
+    const SK_LIVE_PREFIX = "sk" + "_live";
     const input = [
       "openai_key=sk-" + "A".repeat(48),
-      `stripe: ${SK_LIVE}_ABCDEFGHIJKLMNOPQRSTUVWX`,
+      `stripe: ${SK_LIVE_PREFIX}_ABCDEFGHIJKLMNOPQRSTUVWX`,
     ].join(" AND ");
     const result = detector.scrub(input);
     expect(result.clean).toBe(false);
@@ -274,7 +274,7 @@ describe("LeakDetector — Multiple patterns", () => {
     expect(result.patterns).toContain("openai");
     expect(result.patterns).toContain("stripe");
     expect(result.redacted).not.toContain("sk-" + "A".repeat(48));
-    expect(result.redacted).not.toContain(`${SK_LIVE}_`);
+    expect(result.redacted).not.toContain(`${SK_LIVE_PREFIX}_`);
   });
 
   test("redacted string contains no original secret values", () => {

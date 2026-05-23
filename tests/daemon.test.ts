@@ -70,6 +70,7 @@ describe("daemon", () => {
           eventBus: runtime.eventBus,
           skillService: runtime.skillService,
           channelManager: runtime.channelManager,
+          runner: runtime.runner,
           logger: runtime.logger,
         });
 

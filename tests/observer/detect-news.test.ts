@@ -9,15 +9,15 @@ function article(overrides: Partial<NewsArticle> = {}): NewsArticle {
     externalId: "ext-1",
     url: "https://example.com/a",
     title: "BTC ETF approved",
-    snippet: "SEC approves bitcoin ETF…",
+    description: "SEC approves bitcoin ETF…",
     imageUrl: null,
     coins: ["BTC"],
     importance: "important",
     publishedAt: 1_700_000_000, // unix seconds
     fetchedAt: 1_700_000_010,
     expiresAt: 1_700_086_400,
-    fullSummary: "Long-form summary of the ETF approval and its expected market impact.",
-    detailedSummary: null,
+    body: null,
+    summary: "Long-form summary of the ETF approval and its expected market impact.",
     aiRelevant: true,
     aiDuplicateOf: null,
     ...overrides,
@@ -77,9 +77,24 @@ describe("detectNews", () => {
     expect(r.emittedIds).toEqual(["dup"]);
   });
 
-  test("article with null fullSummary → skipped (defensive guard)", () => {
+  test("article with null summary → emits using description as fallback", () => {
     const r = detectNews({
-      articles: [article({ id: "no-summary", fullSummary: null })],
+      articles: [article({
+        id: "no-summary",
+        summary: null,
+        description: "Body unavailable, but description has the gist.",
+      })],
+      priorEmittedIds: new Set(),
+      nowMs: NOW,
+    });
+    expect(r.events).toHaveLength(1);
+    expect(r.events[0].summary).toBe("Body unavailable, but description has the gist.");
+    expect(r.emittedIds).toEqual(["no-summary"]);
+  });
+
+  test("article with null summary AND empty description → skipped", () => {
+    const r = detectNews({
+      articles: [article({ id: "no-text", summary: null, description: "" })],
       priorEmittedIds: new Set(),
       nowMs: NOW,
     });

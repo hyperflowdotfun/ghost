@@ -48,35 +48,130 @@ function formatOneLevel(raw: string): string {
 const CHART_RE_PAIRED = /<chart\s*([^>]*)>([\s\S]*?)<\/chart>/gi;
 const CHART_RE_SELF = /<chart\s+([^>]*?)\/>/gi;
 
-function parseChartAttrs(attrs: string): ChartSpec | null {
-  const symMatch = /\bsymbol\s*=\s*"([^"]+)"/i.exec(attrs);
-  const intMatch = /\binterval\s*=\s*"([^"]+)"/i.exec(attrs);
-  if (!symMatch || !intMatch) return null;
-  const indMatch = /\bindicators\s*=\s*"([^"]+)"/i.exec(attrs);
-  const lvlMatch = /\blevels\s*=\s*"([^"]+)"/i.exec(attrs);
+// Indicator codes the backend chart route accepts (see src/gateway/chart-data.ts
+// VALID_INDICATORS). EMA is rendered as a base layer (always on) and should
+// NOT appear in this list — including it would silently drop on the backend.
+const VALID_INDICATOR_CODES = new Set([
+  "bb", "rsi", "macd", "ichimoku", "keltner", "adx",
+  "stochrsi", "obv", "williamsr", "atr", "cci", "vwap",
+]);
+
+// Display-name → canonical code map. LLMs frequently emit display names
+// (EMA9, Bollinger Bands) instead of codes, so we normalize defensively
+// before passing to the chart route.
+const INDICATOR_ALIAS: Record<string, string> = {
+  bollinger: "bb", "bollinger bands": "bb", bb: "bb",
+  rsi: "rsi",
+  macd: "macd",
+  ichimoku: "ichimoku", cloud: "ichimoku",
+  keltner: "keltner",
+  adx: "adx",
+  stochrsi: "stochrsi", "stoch rsi": "stochrsi",
+  obv: "obv",
+  "williams %r": "williamsr", "williams r": "williamsr", williamsr: "williamsr",
+  atr: "atr",
+  cci: "cci",
+  vwap: "vwap",
+};
+
+/**
+ * Map a raw indicator token (e.g. "EMA9", "Bollinger Bands", "rsi") to a
+ * canonical code the backend accepts, or null if the token doesn't map.
+ * EMAs are always dropped — they render as a base layer regardless.
+ */
+function normalizeIndicatorToken(raw: string): string | null {
+  const t = raw.trim().toLowerCase().replace(/\d+$/, ""); // strip trailing digits: ema9 → ema
+  if (!t) return null;
+  if (t === "ema" || t === "emas") return null;           // base layer, not opt-in
+  const code = INDICATOR_ALIAS[t];
+  return code && VALID_INDICATOR_CODES.has(code) ? code : null;
+}
+
+function normalizeIndicators(raw: string): string | undefined {
+  const codes = Array.from(new Set(
+    raw.split(",")
+      .map(normalizeIndicatorToken)
+      .filter((c): c is string => c !== null),
+  ));
+  return codes.length > 0 ? codes.join(",") : undefined;
+}
+
+function normalizeLevels(raw: string): string | undefined {
+  // Drop non-numeric tokens like "support" / "resistance" — the chart route
+  // only consumes prices. Empty result = omit the param entirely.
+  const nums = raw.split(",")
+    .map(s => s.trim())
+    .filter(s => Number.isFinite(Number(s)));
+  return nums.length > 0 ? nums.join(",") : undefined;
+}
+
+/**
+ * Parse body-style chart specs the LLM sometimes emits:
+ *
+ *   <chart>
+ *     symbol: BTC
+ *     interval: 4h
+ *     indicators: EMA9, RSI, MACD
+ *     levels: 65000, 68500
+ *   </chart>
+ *
+ * Returns a partial attrs object so the regular attribute parser can merge
+ * it as a fallback when attribute-style is empty or incomplete.
+ */
+function parseChartBody(body: string): Partial<Record<"symbol" | "interval" | "indicators" | "levels", string>> {
+  const out: Partial<Record<"symbol" | "interval" | "indicators" | "levels", string>> = {};
+  for (const line of body.split(/\r?\n/)) {
+    const m = /^\s*(symbol|interval|indicators|levels)\s*:\s*(.+?)\s*$/i.exec(line);
+    if (!m) continue;
+    const key = m[1].toLowerCase() as keyof typeof out;
+    if (!out[key]) out[key] = m[2];
+  }
+  return out;
+}
+
+function parseChartAttrs(attrs: string, body?: string): ChartSpec | null {
+  let symbol = /\bsymbol\s*=\s*"([^"]+)"/i.exec(attrs)?.[1];
+  let interval = /\binterval\s*=\s*"([^"]+)"/i.exec(attrs)?.[1];
+  let indicators = /\bindicators\s*=\s*"([^"]+)"/i.exec(attrs)?.[1];
+  let levels = /\blevels\s*=\s*"([^"]+)"/i.exec(attrs)?.[1];
+
+  // Body-style fallback — only consult when attribute form is incomplete.
+  // LLMs sometimes emit `<chart>\nsymbol: BTC\ninterval: 4h\n...\n</chart>`.
+  if (body && (!symbol || !interval)) {
+    const bodyAttrs = parseChartBody(body);
+    symbol ??= bodyAttrs.symbol;
+    interval ??= bodyAttrs.interval;
+    indicators ??= bodyAttrs.indicators;
+    levels ??= bodyAttrs.levels;
+  }
+
+  if (!symbol || !interval) return null;
+
+  const normIndicators = indicators ? normalizeIndicators(indicators) : undefined;
+  const normLevels = levels ? normalizeLevels(levels) : undefined;
   return {
-    symbol: symMatch[1],
-    interval: intMatch[1],
-    ...(indMatch ? { indicators: indMatch[1] } : {}),
-    ...(lvlMatch ? { levels: lvlMatch[1] } : {}),
+    symbol,
+    interval,
+    ...(normIndicators ? { indicators: normIndicators } : {}),
+    ...(normLevels ? { levels: normLevels } : {}),
   };
 }
 
 /**
  * Extract all `<chart>` tags from `text`, returning the stripped text and
- * parsed specs. Invalid specs (missing symbol or interval) are skipped
- * silently. Runs BEFORE the rest of the format pipeline so screenshots
- * can be sent alongside prose.
+ * parsed specs. Invalid specs (missing symbol or interval after attribute +
+ * body fallback) are skipped silently. Runs BEFORE the rest of the format
+ * pipeline so screenshots can be sent alongside prose.
  */
 export function extractCharts(text: string): { text: string; charts: ChartSpec[] } {
   const charts: ChartSpec[] = [];
-  // Paired form first: <chart ...>...</chart>
-  let out = text.replace(CHART_RE_PAIRED, (_m, attrs: string) => {
-    const spec = parseChartAttrs(attrs);
+  // Paired form first: <chart ...>...</chart> — pass body for fallback.
+  let out = text.replace(CHART_RE_PAIRED, (_m, attrs: string, body: string) => {
+    const spec = parseChartAttrs(attrs, body);
     if (spec) charts.push(spec);
     return "";
   });
-  // Self-closing form: <chart ... />
+  // Self-closing form: <chart ... /> — no body to fall back to.
   out = out.replace(CHART_RE_SELF, (_m, attrs: string) => {
     const spec = parseChartAttrs(attrs);
     if (spec) charts.push(spec);

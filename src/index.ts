@@ -12,6 +12,7 @@ import { formatUpdateHint, getCurrentVersion } from "./update/version.js";
 import { readUpdateCache } from "./update/version-cache.js";
 import { ChannelId } from "./channels/types.js";
 import { TOKEN_KEY as TELEGRAM_TOKEN_KEY } from "./channels/telegram/plugin.js";
+import { checkDaemonState } from "./health/daemon-state.js";
 import type { Logger } from "pino";
 
 const { values, positionals } = parseArgs({
@@ -54,9 +55,9 @@ const verbosity = Math.min(
 ) as Verbosity;
 
 // Single root logger for this process — threaded into every subsystem.
-// Always stdout only; the OS service supervisor (launchd / schtasks /
-// systemd append-redirect) owns the log file when run as a service.
-const rootLogger = createRootLogger(verbosity);
+// pino-roll daily mode when running as a service; TTY dev runs pretty-print
+// to stdout. Async factory required — pino-roll's stream setup is async.
+const rootLogger = await createRootLogger(verbosity);
 
 // Print version and exit — probes the registry directly (2s timeout). On
 // fetch failure prints current only and exits 0. No cache reads or writes;
@@ -187,13 +188,23 @@ async function runStatus(opts: { config?: string; logger: Logger }) {
   // only hint when the persisted snapshot confirms a newer version.
   const hint = formatUpdateHint(currentVersion, readUpdateCache());
 
+  const daemonState = await checkDaemonState({
+    host: config.gateway.host,
+    port: config.gateway.port,
+    logger: opts.logger,
+  });
+
   console.log(`Ghost v${currentVersion}`);
   if (hint) console.log(hint);
   console.log("============");
   console.log(`Provider:    ${config.provider}/${config.model}`);
   console.log(`Auth:        ${authDisplay}`);
   console.log(`Autonomy:    ${config.autonomy.level}`);
-  console.log(`Gateway:     http://${config.gateway.host}:${config.gateway.port}`);
+  console.log(
+    `Gateway:     http://${config.gateway.host}:${config.gateway.port} ` +
+      `(${daemonState.gateway.reachable ? "reachable" : "unreachable"})`,
+  );
+  console.log(`Service:     ${daemonState.service}`);
 
   const telegramToken = await credentials.has(TELEGRAM_TOKEN_KEY);
   if (!telegramToken) {
@@ -232,10 +243,23 @@ async function runDoctor(opts: { config?: string; logger: Logger }) {
       console.log(`✗ models.json: ${err}`);
     }
 
+    const daemonState = await checkDaemonState({
+      host: runtime.config.gateway.host,
+      port: runtime.config.gateway.port,
+      logger: opts.logger,
+    });
+    const gatewayMark = daemonState.gateway.reachable ? "✓" : "✗";
+    console.log(
+      `${gatewayMark} Gateway: ${daemonState.gateway.reachable ? "reachable" : "unreachable"} ` +
+        `on ${daemonState.gateway.host}:${daemonState.gateway.port}`,
+    );
+    const serviceMark = daemonState.service === "running" ? "✓" : "✗";
+    console.log(`${serviceMark} Service: ${daemonState.service}`);
+
     runtime.db.close();
     // Exit code and summary must agree. models.json errors are treated as
     // failures — a broken registry means the user's config is unusable at
-    // runtime.
+    // runtime. Gateway/service down is operator state, surfaced but not fatal.
     const hasErrors = custom.loadErrors.length > 0;
     console.log(
       hasErrors

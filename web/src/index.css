@@ -1,6 +1,7 @@
 @import "tailwindcss";
 @source "../node_modules/streamdown/dist/*.js";
 @source "../node_modules/@streamdown/code/dist/*.js";
+@source "../node_modules/@streamdown/math/dist/*.js";
 
 /* Rethink Sans — self-hosted via vite asset pipeline. The 4 .otf files
    in src/assets/fonts/rethink-sans/ cover extended Latin diacritics.
@@ -924,6 +925,63 @@ select:focus-visible {
   }
 }
 
+.article-html {
+  width: 100%;
+  font-size: var(--text-body-lg-size, 16px);
+  line-height: 1.6;
+  color: var(--color-text-primary);
+  word-break: break-word;
+}
+.article-html p { margin: 0 0 12px 0; }
+.article-html p:last-child { margin-bottom: 0; }
+.article-html a { color: #00b8ff; text-decoration: underline; word-break: break-all; }
+.article-html a:hover { color: var(--color-text-primary); }
+.article-html img,
+.article-html figure img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 12px auto;
+  border-radius: 4px;
+}
+.article-html figure { margin: 12px 0; }
+.article-html figcaption {
+  font-size: var(--text-footnote-size, 12px);
+  color: var(--color-text-tertiary);
+  text-align: center;
+  margin-top: 4px;
+}
+.article-html h1, .article-html h2, .article-html h3, .article-html h4 {
+  margin: 16px 0 8px 0;
+  color: var(--color-text-primary);
+  font-weight: 600;
+}
+.article-html h1 { font-size: 22px; }
+.article-html h2 { font-size: 19px; }
+.article-html h3 { font-size: 17px; }
+.article-html h4 { font-size: 15px; }
+.article-html ul, .article-html ol { margin: 0 0 12px 0; padding-left: 22px; }
+.article-html li { margin-bottom: 4px; }
+.article-html blockquote {
+  margin: 12px 0;
+  padding: 4px 0 4px 14px;
+  border-left: 3px solid var(--color-border-strong);
+  color: var(--color-text-secondary);
+}
+.article-html code {
+  background: var(--color-surface-overlay);
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 0.9em;
+}
+.article-html pre {
+  background: var(--color-surface-overlay);
+  padding: 10px 12px;
+  border-radius: 6px;
+  overflow-x: auto;
+  margin: 0 0 12px 0;
+}
+
 @media (max-width: 768px) {
   .hero-panel {
     padding: 0.95rem 0.95rem;
@@ -951,8 +1009,8 @@ select:focus-visible {
 /* ── Trading semantic tags ── */
 
 /* Tier 1 — Hero: LONG/SHORT + percentage (strongest emphasis) */
-.trade-long { @apply font-semibold px-1.5 py-px rounded text-[0.85em] leading-none text-emerald-400 bg-emerald-500/15; }
-.trade-short { @apply font-semibold px-1.5 py-px rounded text-[0.85em] leading-none text-red-400 bg-red-500/15; }
+.trade-long { @apply font-semibold px-1.5 py-px rounded text-[0.85em] leading-none text-emerald-400; }
+.trade-short { @apply font-semibold px-1.5 py-px rounded text-[0.85em] leading-none text-red-400; }
 .trade-pct-up { @apply font-medium text-[0.95em] text-emerald-400; }
 .trade-pct-down { @apply font-medium text-[0.95em] text-red-400; }
 
@@ -964,9 +1022,9 @@ select:focus-visible {
 
 /* Tier 3 — Labels: subtle bg, de-emphasized */
 .trade-tag { @apply font-medium text-[0.9em] leading-none px-1 py-px rounded; }
-.trade-tag-entry { @apply text-blue-400 bg-blue-400/10; }
-.trade-tag-tp { @apply text-emerald-400 bg-emerald-400/10; }
-.trade-tag-sl { @apply text-red-400 bg-red-400/10; }
+.trade-tag-entry { @apply text-blue-400; }
+.trade-tag-tp { @apply text-emerald-400; }
+.trade-tag-sl { @apply text-red-400; }
 .trade-risk { @apply font-medium text-[0.9em]; }
 .trade-risk-low { @apply text-emerald-400; }
 .trade-risk-medium { @apply text-amber-400; }

@@ -1,5 +1,8 @@
 import pino from "pino";
 import pinoPretty from "pino-pretty";
+import pinoRoll from "pino-roll";
+import { join } from "node:path";
+import { defaultLogDir } from "./services/os/utils.js";
 
 export type Verbosity = 0 | 1 | 2;
 
@@ -54,14 +57,34 @@ function serializeErr(err: unknown): unknown {
 
 const VALID_LEVELS = new Set(["fatal", "error", "warn", "info", "debug", "trace", "silent"]);
 
-export function createRootLogger(verbosity: Verbosity = 0): pino.Logger {
+/**
+ * Create the root pino logger for this process.
+ *
+ * Always writes to ~/.ghost/logs/ghost.YYYY-MM-DD.<N>.log via pino-roll
+ * (rotates at midnight or 10 MB within a day, keeps 5 most-recent files,
+ * ~50 MB total cap). When stdout is a TTY, ALSO mirrors to pretty-printed
+ * stdout — same record, two destinations — via pino.multistream.
+ *
+ * Why always-to-file (no isTTY branching): under Windows schtasks the
+ * supervisor runs the daemon under a hidden cmd console. The console still
+ * makes `process.stdout.isTTY` report true even though no user can see it,
+ * so an either/or branch silently routed every log line to NUL. Multistream
+ * sidesteps the heuristic entirely — the file is always the source of truth,
+ * pretty stdout is just a developer-comfort mirror.
+ *
+ * Supervisor stdout sinks (unmanaged — only catches pre-flush crashes):
+ *   systemd  → journald
+ *   launchd  → unified logging
+ *   schtasks → hidden console (effectively NUL)
+ */
+export async function createRootLogger(verbosity: Verbosity = 0): Promise<pino.Logger> {
   const envLevel = process.env.LOG_LEVEL;
-  const level =
+  const level: pino.Level =
     verbosity >= 2
       ? "trace"
       : verbosity >= 1
         ? "debug"
-        : (envLevel && VALID_LEVELS.has(envLevel) ? envLevel : "info");
+        : (envLevel && VALID_LEVELS.has(envLevel) ? (envLevel as pino.Level) : "info");
 
   const opts: pino.LoggerOptions = {
     level,
@@ -75,14 +98,40 @@ export function createRootLogger(verbosity: Verbosity = 0): pino.Logger {
     },
   };
 
-  // Pino writes to stdout only. The OS service supervisor owns the log file:
-  //   launchd  → StandardOutPath redirects stdout to ghost.log
-  //   schtasks → cmd.exe `>>"%GHOST_LOG%" 2>&1` redirects stdout to ghost.log
-  //   systemd  → StandardOutput=append:<path> redirects stdout to ghost.log
-  // Pretty rendering only when attached to a real terminal.
-  if (process.stdout.isTTY) {
-    return pino(opts, pinoPretty({ colorize: true }));
+  // 1. Always set up the rotating file destination. Failure here is fatal
+  //    for the file path; we still surface logs via stdout (if TTY) and
+  //    stderr (one-liner diagnostic).
+  // No symlink: pino-roll's createSymlink is called without await, causing
+  // an unhandled EPERM rejection on Windows (no Developer Mode), which triggers
+  // the unhandledRejection handler → exit 101 → supervisor restart loop.
+  const streams: pino.StreamEntry[] = [];
+  try {
+    const fileStream = await pinoRoll({
+      file: join(defaultLogDir(), "ghost"),
+      frequency: "daily",
+      dateFormat: "yyyy-MM-dd",
+      size: "10m",
+      extension: ".log",
+      limit: { count: 5, removeOtherLogFiles: true },
+      mkdir: true,
+    });
+    streams.push({ stream: fileStream, level });
+  } catch (err) {
+    // Log rotation setup failed (EACCES on ~/.ghost/logs, disk full, etc.).
+    // Fall back to stderr so the CLI stays usable — `ghost doctor` is the
+    // user's escape hatch and it must not crash on the same condition.
+    const msg = err instanceof Error ? err.message : String(err);
+    process.stderr.write(`[ghost] log rotation init failed (${msg}); falling back to stderr\n`);
+    streams.push({ stream: process.stderr, level });
   }
-  return pino(opts);
-}
 
+  // 2. If a real interactive terminal is attached (developer running
+  //    `bun run dev daemon`), mirror the same records to a pretty-printed
+  //    stdout. In service contexts stdout goes to a hidden console / journald
+  //    / NUL — the file stream above is the source of truth.
+  if (process.stdout.isTTY) {
+    streams.push({ stream: pinoPretty({ colorize: true }), level });
+  }
+
+  return pino(opts, pino.multistream(streams));
+}

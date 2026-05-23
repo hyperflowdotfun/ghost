@@ -18,7 +18,17 @@ import {
   NEWS_SOURCE_PRESETS,
 } from "./news-types.js";
 import { createAdapter, type RawArticle } from "./news-sources.js";
-import { mapRow, mapSource, tokenize, tokenOverlap } from "./news-helpers.js";
+import { mapRow, mapSource, tokenize, tokenOverlap, stripHtmlToText } from "./news-helpers.js";
+import { validateUrlSafety } from "../helpers/url-safety.js";
+import { parseHTML } from "linkedom";
+import { Readability } from "@mozilla/readability";
+import sanitizeHtml from "sanitize-html";
+
+const MAX_BODY_LEN = 300_000;
+const BODY_FETCH_CONCURRENCY = 5;
+const BODY_FETCH_TIMEOUT_MS = 10_000;
+// Plain UA — default fetch UA gets blocked by some news sites.
+const BODY_FETCH_UA = "Mozilla/5.0 (compatible; Ghost/1.0; +https://github.com/anthropics)";
 
 export class NewsService {
   private readonly stmts;
@@ -34,13 +44,15 @@ export class NewsService {
     this.stmts = {
       insertArticle: db.prepare(`
         INSERT OR IGNORE INTO articles
-          (id, source_id, external_id, url, title, snippet, image_url, coins, importance, published_at, fetched_at, expires_at, full_summary)
+          (id, source_id, external_id, url, title, description, image_url, coins, importance, published_at, fetched_at, expires_at, body)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `),
       dismissArticle: db.prepare(`UPDATE articles SET dismissed_at = unixepoch() WHERE id = ?`),
       pruneExpired: db.prepare(`DELETE FROM articles WHERE expires_at < unixepoch()`),
       getArticle: db.prepare(`SELECT * FROM articles WHERE id = ?`),
-      updateSummary: db.prepare(`UPDATE articles SET full_summary = ? WHERE id = ?`),
+      updateSummary: db.prepare(`UPDATE articles SET summary = ? WHERE id = ?`),
+      getBody: db.prepare(`SELECT body FROM articles WHERE id = ?`),
+      saveBody: db.prepare(`UPDATE articles SET body = ? WHERE id = ?`),
       // Recent titles for cross-source dedup (within 6h window)
       recentTitles: db.prepare(`
         SELECT id, title FROM articles
@@ -57,11 +69,10 @@ export class NewsService {
       setApiKey: db.prepare(`UPDATE news_sources SET api_key = ? WHERE source_id = ?`),
       removeSource: db.prepare(`DELETE FROM news_sources WHERE source_id = ?`),
       getSource: db.prepare(`SELECT source_id, name, enabled, api_key, custom_url, added_at FROM news_sources WHERE source_id = ?`),
-      unsummarized: db.prepare(`SELECT id FROM articles WHERE full_summary IS NULL AND ai_relevant = 1 ORDER BY published_at DESC LIMIT ?`),
       // AI relevance evaluation
       updateRelevance: db.prepare(`UPDATE articles SET ai_relevant = ? WHERE id = ?`),
       updateDuplicate: db.prepare(`UPDATE articles SET ai_duplicate_of = ? WHERE id = ?`),
-      pendingEvaluation: db.prepare(`SELECT id, title, snippet FROM articles WHERE ai_relevant IS NULL ORDER BY published_at DESC LIMIT ?`),
+      pendingEvaluation: db.prepare(`SELECT id, title, description FROM articles WHERE ai_relevant IS NULL ORDER BY published_at DESC LIMIT ?`),
       evaluatedTitles: db.prepare(`SELECT id, title FROM articles WHERE ai_relevant IS NOT NULL ORDER BY published_at DESC LIMIT ?`),
       // Per-(chat, scope) /news pagination — track which articles were
       // already delivered to a chat so the next call can drain different
@@ -104,49 +115,107 @@ export class NewsService {
 
     const now = Math.floor(Date.now() / 1000);
     const watchlistSymbols = new Set(this.watchlist.list().map((w) => w.symbol));
-    let inserted = 0;
 
+    const candidates: Array<{ source: NewsSource; raw: RawArticle }> = [];
     for (let i = 0; i < results.length; i++) {
       const result = results[i];
       if (result.status === "rejected") {
         this.log.warn({ source: sources[i].sourceId, reason: result.reason }, "source fetch failed");
         continue;
       }
-
       for (const raw of result.value) {
-        // Cross-source dedup check
         if (this.isDuplicate(raw, sources[i].sourceId, now)) continue;
-
-        const importance = this.classifyImportance(raw, watchlistSymbols);
-        const ttl = importance === "urgent" ? URGENT_TTL : importance === "important" ? IMPORTANT_TTL : REFERENCE_TTL;
-        const id = crypto.randomUUID();
-
-        try {
-          this.stmts.insertArticle.run(
-            id,
-            sources[i].sourceId,
-            raw.externalId,
-            raw.url,
-            raw.title,
-            raw.snippet,
-            raw.imageUrl ?? null,
-            JSON.stringify(raw.coins),
-            importance,
-            raw.publishedAt,
-            now,
-            raw.publishedAt + ttl,
-            null,
-          );
-          inserted++;
-        } catch {
-          // UNIQUE constraint violation — same source+externalId, skip
-        }
+        if (!this.isCryptoRelevant(raw.title, raw.description)) continue;
+        candidates.push({ source: sources[i], raw });
       }
     }
 
-    // Prune expired articles
+    await this.fetchBodiesParallel(candidates.map((c) => c.raw));
+
+    let inserted = 0;
+    let bodyOk = 0;
+    for (const { source, raw } of candidates) {
+      const importance = this.classifyImportance(raw, watchlistSymbols);
+      const ttl = importance === "urgent" ? URGENT_TTL : importance === "important" ? IMPORTANT_TTL : REFERENCE_TTL;
+      const id = crypto.randomUUID();
+
+      try {
+        this.stmts.insertArticle.run(
+          id,
+          source.sourceId,
+          raw.externalId,
+          raw.url,
+          raw.title,
+          raw.description,
+          raw.imageUrl ?? null,
+          JSON.stringify(raw.coins),
+          importance,
+          raw.publishedAt,
+          now,
+          raw.publishedAt + ttl,
+          raw.body ?? null,
+        );
+        inserted++;
+        if (raw.body) bodyOk++;
+      } catch {
+        // UNIQUE constraint violation — same source+externalId, skip
+      }
+    }
+
+    if (candidates.length > 0) {
+      this.log.info(
+        { candidates: candidates.length, inserted, bodyOk, bodyMissing: inserted - bodyOk },
+        "news fetch complete",
+      );
+    }
+
     this.pruneExpired();
     return inserted;
+  }
+
+  private async fetchBodiesParallel(items: RawArticle[]): Promise<void> {
+    if (items.length === 0) return;
+    let cursor = 0;
+    const workers = Array.from({ length: Math.min(BODY_FETCH_CONCURRENCY, items.length) }, async () => {
+      while (true) {
+        const idx = cursor++;
+        if (idx >= items.length) return;
+        const raw = items[idx]!;
+        try {
+          raw.body = await this.fetchArticleBody(raw.url);
+        } catch (err) {
+          this.log.debug({ url: raw.url, err: String(err) }, "body fetch failed");
+          raw.body = null;
+        }
+      }
+    });
+    await Promise.all(workers);
+  }
+
+  // URLs come from third-party RSS feeds, so route through the SSRF guard
+  // and refuse to follow redirects that might point at internal addresses.
+  private async fetchArticleBody(url: string): Promise<string | null> {
+    try {
+      await validateUrlSafety(url);
+    } catch {
+      return null;
+    }
+    const res = await fetch(url, {
+      headers: { "User-Agent": BODY_FETCH_UA, Accept: "text/html,*/*" },
+      signal: AbortSignal.timeout(BODY_FETCH_TIMEOUT_MS),
+      redirect: "manual",
+    });
+    if (res.status >= 300 && res.status < 400) return null;
+    if (!res.ok) return null;
+    const html = await res.text();
+
+    const extracted = extractMainContent(html, url);
+    if (!extracted) {
+      const text = stripHtmlToText(html);
+      if (text.length < 100) return null;
+      return text.length > MAX_BODY_LEN ? text.slice(0, MAX_BODY_LEN) : text;
+    }
+    return capHtmlLength(extracted, MAX_BODY_LEN);
   }
 
   getArticles(opts: {
@@ -179,19 +248,12 @@ export class NewsService {
       cursorParams.push(opts.afterPublishedAt, opts.afterPublishedAt, opts.afterId);
     }
 
-    // full_summary IS NOT NULL: hide articles still in the
-    // evaluate→summarize pipeline. The chain runs in the background news
-    // jobs with a short window (≤ ~20 s) and summarizeBatch falls back to
-    // [partial]<snippet> on LLM failure, so articles eventually appear
-    // either way. Filtering at the API keeps the widget contract
-    // "showed = ready to read" and removes the half-rendered state.
     const sql = `
-      SELECT id, source_id, external_id, url, title, snippet, image_url, coins,
-             importance, published_at, fetched_at, expires_at, full_summary,
+      SELECT id, source_id, external_id, url, title, description, image_url, coins,
+             importance, published_at, fetched_at, expires_at, body, summary,
              ai_relevant, ai_duplicate_of
       FROM articles
       WHERE ai_relevant = 1 AND ai_duplicate_of IS NULL AND dismissed_at IS NULL
-        AND full_summary IS NOT NULL
         ${coinClause} ${importanceClause} ${cursorClause}
       ORDER BY published_at DESC, id DESC
       LIMIT ? OFFSET ?
@@ -212,12 +274,11 @@ export class NewsService {
    */
   listRecentRelevant(sinceTs: number, limit = 20): NewsArticle[] {
     const sql = `
-      SELECT id, source_id, external_id, url, title, snippet, image_url, coins,
-             importance, published_at, fetched_at, expires_at, full_summary,
+      SELECT id, source_id, external_id, url, title, description, image_url, coins,
+             importance, published_at, fetched_at, expires_at, body, summary,
              ai_relevant, ai_duplicate_of
       FROM articles
       WHERE ai_relevant = 1
-        AND full_summary IS NOT NULL
         AND ai_duplicate_of IS NULL
         AND dismissed_at IS NULL
         AND expires_at > unixepoch()
@@ -239,7 +300,7 @@ export class NewsService {
 
     // Keyword search
     if (opts.query) {
-      conditions.push("(title LIKE ? OR snippet LIKE ?)");
+      conditions.push("(title LIKE ? OR description LIKE ?)");
       const pattern = `%${opts.query}%`;
       params.push(pattern, pattern);
     }
@@ -253,8 +314,8 @@ export class NewsService {
 
     params.push(limit);
     const sql = `
-      SELECT id, source_id, external_id, url, title, snippet, image_url, coins,
-             importance, published_at, fetched_at, expires_at, full_summary,
+      SELECT id, source_id, external_id, url, title, description, image_url, coins,
+             importance, published_at, fetched_at, expires_at, body, summary,
              ai_relevant, ai_duplicate_of
       FROM articles
       WHERE ${conditions.join(" AND ")}
@@ -276,7 +337,6 @@ export class NewsService {
     const sql = `
       SELECT COUNT(*) AS c FROM articles
       WHERE ai_relevant = 1 AND ai_duplicate_of IS NULL AND dismissed_at IS NULL
-        AND full_summary IS NOT NULL
         ${coinClause} ${importanceClause}
     `;
     const params = [...coins, ...(opts.importance ? [opts.importance] : [])];
@@ -324,9 +384,9 @@ export class NewsService {
     }
     params.push(limit);
     const sql = `
-      SELECT a.id, a.source_id, a.external_id, a.url, a.title, a.snippet,
+      SELECT a.id, a.source_id, a.external_id, a.url, a.title, a.description,
              a.image_url, a.coins, a.importance, a.published_at, a.fetched_at,
-             a.expires_at, a.full_summary, a.ai_relevant, a.ai_duplicate_of
+             a.expires_at, a.body, a.summary, a.ai_relevant, a.ai_duplicate_of
       FROM articles a
       WHERE a.ai_relevant = 1
         AND a.ai_duplicate_of IS NULL
@@ -438,68 +498,33 @@ export class NewsService {
   // Pure CRUD — called from the news background jobs via taskAgent
   // ---------------------------------------------------------------------------
 
-  /**
-   * Return up to `limit` relevant articles that still need a full_summary.
-   * Called by the news-summarize job before prompting taskAgent.
-   */
-  listPendingSummaries(limit = 10): NewsArticle[] {
-    const rows = this.stmts.unsummarized.all(limit) as Array<{ id: string }>;
-    return rows
-      .map((r) => this.getArticle(r.id))
-      .filter((a): a is NewsArticle => !!a);
-  }
-
-  /**
-   * Persist a summary text for the given article.
-   * Caller is responsible for passing a non-empty string.
-   */
   saveSummary(articleId: string, text: string): void {
     this.stmts.updateSummary.run(text, articleId);
   }
 
-  /**
-   * Return up to `batchSize` articles that have not been evaluated for
-   * AI relevance yet (ai_relevant IS NULL), after applying the rule-based
-   * crypto pre-filter. Irrelevant articles are marked immediately so the
-   * caller's AI call is scoped to genuine candidates only.
-   *
-   * Returns `{ candidates, total }` where `total` is the raw pending count
-   * (pre-filter) so the caller can log how many were processed overall.
-   */
+  getBody(articleId: string): string | null {
+    const row = this.stmts.getBody.get(articleId) as { body: string | null } | undefined;
+    return row?.body ?? null;
+  }
+
+  saveBody(articleId: string, body: string): void {
+    this.stmts.saveBody.run(body, articleId);
+  }
+
+  // existingTitles is a small recent slice the LLM uses to spot duplicates
+  // across the evaluation batch.
   listPendingEvaluations(batchSize = 20): {
-    candidates: Array<{ id: string; title: string; snippet: string }>;
+    candidates: Array<{ id: string; title: string; description: string }>;
     existingTitles: Array<{ id: string; title: string }>;
     total: number;
   } {
-    const pending = this.stmts.pendingEvaluation.all(batchSize) as Array<{
+    const candidates = this.stmts.pendingEvaluation.all(batchSize) as Array<{
       id: string;
       title: string;
-      snippet: string;
+      description: string;
     }>;
-    if (pending.length === 0) {
+    if (candidates.length === 0) {
       return { candidates: [], existingTitles: [], total: 0 };
-    }
-
-    // Tier 1: Rule-based pre-filter (free, no tokens)
-    const candidates: typeof pending = [];
-    const rejected: typeof pending = [];
-    for (const article of pending) {
-      if (this.isCryptoRelevant(article.title, article.snippet)) {
-        candidates.push(article);
-      } else {
-        rejected.push(article);
-      }
-    }
-
-    // Mark rejected articles irrelevant immediately
-    for (const article of rejected) {
-      this.stmts.updateRelevance.run(0, article.id);
-    }
-    if (rejected.length > 0) {
-      this.log.info(
-        { rejected: rejected.length, candidates: candidates.length },
-        "pre-filter complete",
-      );
     }
 
     const existingTitles = this.stmts.evaluatedTitles.all(50) as Array<{
@@ -507,7 +532,7 @@ export class NewsService {
       title: string;
     }>;
 
-    return { candidates, existingTitles, total: pending.length };
+    return { candidates, existingTitles, total: candidates.length };
   }
 
   /**
@@ -526,8 +551,8 @@ export class NewsService {
   }
 
   /** Rule-based check: does the article mention crypto at all? */
-  private isCryptoRelevant(title: string, snippet: string): boolean {
-    const text = `${title} ${snippet}`.toLowerCase();
+  private isCryptoRelevant(title: string, description: string): boolean {
+    const text = `${title} ${description}`.toLowerCase();
     // Pass if any crypto keyword matches
     for (const kw of CRYPTO_KEYWORDS) {
       if (text.includes(kw)) return true;
@@ -536,7 +561,7 @@ export class NewsService {
   }
 
   private classifyImportance(raw: RawArticle, watchlistSymbols: Set<string>): Importance {
-    const text = `${raw.title} ${raw.snippet}`.toLowerCase();
+    const text = `${raw.title} ${raw.description}`.toLowerCase();
 
     // Check urgent keywords
     for (const keyword of URGENT_KEYWORDS) {
@@ -567,5 +592,109 @@ export class NewsService {
     }
 
     return false;
+  }
+}
+
+// Allowlist of HTML tags + attrs kept after Readability extraction. Anything
+// not listed is dropped wholesale by sanitize-html (no unwrap-and-keep-children;
+// we want a strict allowlist on the security boundary). SVG/MathML namespaces,
+// event-handler attributes, javascript:/data: URLs, and CSS expressions are
+// blocked by sanitize-html's defaults.
+const ALLOWED_TAGS: ReadonlyArray<string> = [
+  "p", "br", "a", "strong", "b", "em", "i", "u",
+  "h1", "h2", "h3", "h4", "h5", "h6",
+  "ul", "ol", "li",
+  "blockquote", "img", "figure", "figcaption",
+  "code", "pre", "hr",
+];
+
+const SANITIZE_OPTIONS: sanitizeHtml.IOptions = {
+  allowedTags: [...ALLOWED_TAGS],
+  allowedAttributes: {
+    // target/rel are listed so the transformTags merge can write them — the
+    // transform runs after the attr sweep, so attacker-supplied values get
+    // overwritten with our safe defaults.
+    a: ["href", "target", "rel"],
+    img: ["src", "alt"],
+  },
+  allowedSchemes: ["http", "https"],
+  // Drop content of these tags entirely instead of unwrapping.
+  nonTextTags: ["style", "script", "textarea", "option", "noscript"],
+  // Mark every link target=_blank rel=noopener; sanitize-html merges these in
+  // and re-validates the result so attacker-supplied rel=opener can't slip in.
+  transformTags: {
+    a: sanitizeHtml.simpleTransform("a", { target: "_blank", rel: "noopener noreferrer" }, true),
+  },
+  // Keep our own scheme allowlist as the source of truth instead of relying on
+  // sanitize-html's per-tag default (allowedSchemes wins anyway, but explicit).
+  allowedSchemesByTag: {},
+  allowProtocolRelative: false,
+};
+
+export function extractMainContent(html: string, baseUrl?: string): string | null {
+  try {
+    const { document } = parseHTML(html);
+    const reader = new Readability(document as unknown as Document, {
+      charThreshold: 250,
+    });
+    const parsed = reader.parse();
+    if (!parsed) return null;
+    const rawHtml = parsed.content ?? "";
+    if (rawHtml.trim().length === 0) return null;
+
+    const resolved = baseUrl ? resolveRelativeUrls(rawHtml, baseUrl) : rawHtml;
+    const sanitized = sanitizeHtml(resolved, SANITIZE_OPTIONS).trim();
+    if (sanitized.length === 0) return null;
+
+    const textLen = stripHtmlToText(sanitized).length;
+    if (textLen < 100) return null;
+    return sanitized;
+  } catch {
+    return null;
+  }
+}
+
+// Resolve href/src to absolute URLs against baseUrl. We do this BEFORE
+// sanitize-html so the scheme check has the final URL to inspect — otherwise
+// a relative URL like "/x" would pass sanitize-html's scheme filter (no scheme
+// to reject) only to render against the wrong origin on the client.
+function resolveRelativeUrls(html: string, baseUrl: string): string {
+  const { document } = parseHTML(`<div id="__root__">${html}</div>`);
+  const root = document.getElementById("__root__");
+  if (!root) return html;
+  for (const attr of ["href", "src"] as const) {
+    const els = root.querySelectorAll(`[${attr}]`);
+    for (const el of els) {
+      const raw = el.getAttribute(attr);
+      if (!raw) continue;
+      const abs = resolveUrl(raw, baseUrl);
+      if (abs) el.setAttribute(attr, abs);
+      else el.removeAttribute(attr);
+    }
+  }
+  return (root as unknown as { innerHTML: string }).innerHTML;
+}
+
+// Bound HTML output size while keeping markup well-formed. Slice input below
+// the cap with headroom for sanitize-html to insert closing tags (the parser
+// will balance a split `<p>foo bar` to `<p>foo bar</p>` — that addition must
+// not push us back over cap).
+const CLOSE_TAG_BUDGET = 512;
+
+function capHtmlLength(html: string, cap: number): string {
+  if (html.length <= cap) return html;
+  const budgeted = sanitizeHtml(html.slice(0, cap - CLOSE_TAG_BUDGET), SANITIZE_OPTIONS);
+  return budgeted.length > cap ? budgeted.slice(0, cap) : budgeted;
+}
+
+function resolveUrl(value: string, baseUrl: string): string | null {
+  const v = value.trim();
+  if (!v) return null;
+  try {
+    const u = new URL(v, baseUrl);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+    return u.toString();
+  } catch {
+    return null;
   }
 }

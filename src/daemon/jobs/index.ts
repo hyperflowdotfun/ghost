@@ -6,13 +6,12 @@
 
 import type { BackgroundJobRunner } from "./runner.js";
 import type { Config } from "../../config/schema.js";
-import { newsFetchJob, newsSummarizeJob, newsEvaluateJob } from "./news.js";
+import { newsFetchJob, newsEvaluateJob } from "./news.js";
 import { tweetFetchJob, tweetEvaluateJob } from "./tweets.js";
 import { buildObserverJob } from "./observer.js";
 
 export function registerDefaultJobs(runner: BackgroundJobRunner, config: Config): void {
   runner.register(newsFetchJob);
-  runner.register(newsSummarizeJob);
   runner.register(newsEvaluateJob);
   runner.register(tweetFetchJob);
   runner.register(tweetEvaluateJob);

@@ -1,6 +1,10 @@
-import { type ReactNode, useEffect } from 'react';
+import { type ReactNode, Children, isValidElement, useEffect } from 'react';
 import { Streamdown, type StreamdownProps } from 'streamdown';
 import { code } from '@streamdown/code';
+import { createMathPlugin } from '@streamdown/math';
+import 'katex/dist/katex.min.css';
+
+const math = createMathPlugin({ singleDollarTextMath: true });
 import { LinkPreviewModal } from './LinkPreviewModal';
 import { ChartDataProvider } from './ChartDataContext';
 import { useChartDataStore, chartDataKey } from './ChartDataContext-internals';
@@ -8,6 +12,7 @@ import { useChartData } from '@/hooks/useChartData';
 import { useChartPanel } from '@/components/chart/ChartPanelContext-internals';
 import { IndicatorMention } from '@/components/chart/IndicatorMention';
 import { LevelMention } from '@/components/chart/LevelMention';
+import { normalizeMathDelimiters } from './math-delimiters';
 
 /* ── Chart tag renderer ──
  * Fetches chart data into the ChartDataContext (used by <ind>/<lvl>
@@ -16,6 +21,38 @@ import { LevelMention } from '@/components/chart/LevelMention';
  * agent emits only a chart tag. Clicking the pill opens the
  * fullscreen chart overlay.
  */
+
+/**
+ * Fallback parser for body-style `<chart>` content: walks the React children
+ * tree for `key: value` lines. Mirrors the backend's body-style fallback in
+ * `src/channels/telegram/format/tags.ts` so web + telegram accept the same
+ * malformed-but-recoverable LLM output.
+ */
+function parseChartBodyChildren(
+  children: ReactNode,
+): { symbol?: string; interval?: string; indicators?: string } | null {
+  const text = collectText(children);
+  if (!text) return null;
+  const out: { symbol?: string; interval?: string; indicators?: string } = {};
+  for (const line of text.split(/\r?\n/)) {
+    const m = /^\s*(symbol|interval|indicators)\s*:\s*(.+?)\s*$/i.exec(line);
+    if (!m) continue;
+    const key = m[1].toLowerCase() as 'symbol' | 'interval' | 'indicators';
+    if (!out[key]) out[key] = m[2];
+  }
+  return out.symbol ? out : null;
+}
+
+function collectText(node: ReactNode): string {
+  if (node == null || typeof node === 'boolean') return '';
+  if (typeof node === 'string' || typeof node === 'number') return String(node);
+  if (Array.isArray(node)) return node.map(collectText).join('');
+  if (isValidElement(node)) {
+    const children = (node.props as { children?: ReactNode }).children;
+    return Children.toArray(children).map(collectText).join('');
+  }
+  return '';
+}
 
 function ChartTag({
   symbol,
@@ -145,15 +182,20 @@ const tradingComponents = {
   lvl: ({ price, children }: { price?: string; children?: ReactNode }) => (
     <LevelMention price={price}>{children}</LevelMention>
   ),
-  chart: ({ children, ...props }: { children?: ReactNode } & Record<string, unknown>) => (
-    <ChartTag
-      symbol={String(props.symbol ?? '')}
-      interval={props.interval ? String(props.interval) : undefined}
-      indicators={props.indicators ? String(props.indicators) : undefined}
-    >
-      {children}
-    </ChartTag>
-  ),
+  chart: ({ children, ...props }: { children?: ReactNode } & Record<string, unknown>) => {
+    // Resolve spec — prefer attributes; fall back to parsing body-style
+    // `key: value` lines (LLMs occasionally emit `<chart>\nsymbol: BTC\n…</chart>`
+    // instead of the documented `<chart symbol="…" />` attribute form).
+    const fallback = props.symbol ? null : parseChartBodyChildren(children);
+    const symbol = String(props.symbol ?? fallback?.symbol ?? '');
+    const interval = props.interval ? String(props.interval) : fallback?.interval;
+    const indicators = props.indicators ? String(props.indicators) : fallback?.indicators;
+    return (
+      <ChartTag symbol={symbol} interval={interval} indicators={indicators}>
+        {fallback ? null : children}
+      </ChartTag>
+    );
+  },
 };
 
 /* ── Ask-wizard block: hide entirely in the bubble ──
@@ -195,7 +237,7 @@ const tableComponents = {
 
 /* ── Streamdown config (stable references) ── */
 
-const plugins = { code };
+const plugins = { code, math };
 
 const mdComponents = {
   ...tradingComponents,
@@ -220,6 +262,7 @@ export function StreamingMarkdown({
   content,
   streaming,
 }: StreamingMarkdownProps) {
+  const normalized = normalizeMathDelimiters(content);
   return (
     <ChartDataProvider>
       <div className="chat-md">
@@ -233,7 +276,7 @@ export function StreamingMarkdown({
           isAnimating={streaming}
           caret="block"
         >
-          {content}
+          {normalized}
         </Streamdown>
       </div>
     </ChartDataProvider>

@@ -116,6 +116,12 @@ export const tweetEvaluateJob: BackgroundJob = {
       const candidates = runtime.tweetService.listPendingEvaluations(20);
       if (candidates.length === 0) return;
 
+      if (!runtime.preferenceStore.getTweetFilterEnabled()) {
+        runtime.tweetService.saveEvaluation(candidates, candidates.map((c) => c.id));
+        logger.info({ count: candidates.length }, "evaluated tweets (filter off)");
+        return;
+      }
+
       const userPrompt = runtime.preferenceStore.getTweetFilterPrompt();
       const instruction =
         userPrompt && userPrompt.trim().length > 0

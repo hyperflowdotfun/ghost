@@ -84,7 +84,7 @@ export const newsHandler: CommandHandler = async ({ chatId, newsService }, args)
 
   articles.forEach((a, i) => {
     const title = escapeMarkdownEmphasis(a.title).replace(/[[\]]/g, "");
-    const summary = escapeMarkdownEmphasis(a.fullSummary ?? a.snippet);
+    const summary = escapeMarkdownEmphasis(a.summary ?? a.description);
     const sourceName = sourceNames.get(a.sourceId) ?? fallbackSourceName(a.sourceId);
     const label = `[${sourceName} · ${timeAgo(a.publishedAt)}] ${title}`;
     lines.push(`${i + 1}. **${wrapLink(a.url, label)}**`);
