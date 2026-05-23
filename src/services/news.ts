@@ -120,7 +120,10 @@ export class NewsService {
     for (let i = 0; i < results.length; i++) {
       const result = results[i];
       if (result.status === "rejected") {
-        this.log.warn({ source: sources[i].sourceId, reason: result.reason }, "source fetch failed");
+        // Use `err` (pino's standard error key) so message + stack are serialized.
+        // The legacy `reason` key produced `reason:{}` lines that hid HTTP 4xx/3xx
+        // diagnostics for hours.
+        this.log.warn({ source: sources[i].sourceId, err: result.reason }, "source fetch failed");
         continue;
       }
       for (const raw of result.value) {
@@ -140,7 +143,10 @@ export class NewsService {
       const id = crypto.randomUUID();
 
       try {
-        this.stmts.insertArticle.run(
+        // INSERT OR IGNORE returns changes=0 on (source_id, external_id) conflict
+        // without throwing, so a try/catch alone can't tell apart a real insert
+        // from a same-RSS-item-already-stored skip. Gate the counters on changes.
+        const res = this.stmts.insertArticle.run(
           id,
           source.sourceId,
           raw.externalId,
@@ -155,10 +161,12 @@ export class NewsService {
           raw.publishedAt + ttl,
           raw.body ?? null,
         );
-        inserted++;
-        if (raw.body) bodyOk++;
-      } catch {
-        // UNIQUE constraint violation — same source+externalId, skip
+        if (res.changes > 0) {
+          inserted++;
+          if (raw.body) bodyOk++;
+        }
+      } catch (err) {
+        this.log.debug({ err, url: raw.url }, "article insert failed");
       }
     }
 

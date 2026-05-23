@@ -102,8 +102,13 @@ export class RssAdapter implements SourceAdapter {
     await validateUrlSafety(url);
     // redirect:"manual" prevents SSRF via 3xx to internal addresses.
     const res = await fetch(url, { signal: AbortSignal.timeout(15_000), redirect: "manual" });
-    // Redirects are not followed: treat as a fetch failure and return empty.
-    if (res.status >= 300 && res.status < 400) return [];
+    if (res.status >= 300 && res.status < 400) {
+      // A silent return here once hid a stale CoinDesk preset URL (308 → canonical)
+      // for hours of zero inserts. Surface the redirect so the operator can update
+      // the source URL — the SSRF guard still refuses to follow it automatically.
+      const location = res.headers.get("location") ?? "(no Location header)";
+      throw new Error(`RSS ${this.sourceId}: HTTP ${res.status} redirect to ${location} — update source URL`);
+    }
     if (!res.ok) throw new Error(`RSS ${this.sourceId}: HTTP ${res.status}`);
     const xml = await res.text();
     return parseRss(xml, this.sourceId);

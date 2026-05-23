@@ -145,7 +145,7 @@ export interface NewsSourcePreset {
 
 export const NEWS_SOURCE_PRESETS: NewsSourcePreset[] = [
   { sourceId: "cryptopanic", name: "CryptoPanic", type: "api", needsApiKey: true },
-  { sourceId: "coindesk", name: "CoinDesk", type: "rss", needsApiKey: false, defaultUrl: "https://www.coindesk.com/arc/outboundfeeds/rss/" },
+  { sourceId: "coindesk", name: "CoinDesk", type: "rss", needsApiKey: false, defaultUrl: "https://www.coindesk.com/arc/outboundfeeds/rss" },
   { sourceId: "theblock", name: "The Block", type: "rss", needsApiKey: false, defaultUrl: "https://www.theblock.co/rss.xml" },
   { sourceId: "decrypt", name: "Decrypt", type: "rss", needsApiKey: false, defaultUrl: "https://decrypt.co/feed" },
   { sourceId: "cointelegraph", name: "CoinTelegraph", type: "rss", needsApiKey: false, defaultUrl: "https://cointelegraph.com/rss" },

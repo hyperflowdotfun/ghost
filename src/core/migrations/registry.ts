@@ -241,6 +241,23 @@ const reshapeArticlesMigration: Migration<Database> = {
   },
 };
 
+// CoinDesk's `…/rss/` (with trailing slash) issues a 308 to the canonical
+// `…/rss`. The RSS adapter refuses to follow redirects (SSRF guard), so the
+// stale preset URL produced zero inserts for affected installs. Only rewrite
+// the exact known-broken value — leave custom user-set URLs alone.
+const fixCoindeskRssUrlMigration: Migration<Database> = {
+  version: 12,
+  label: "fix_coindesk_rss_url",
+  up: (db) => {
+    db.run(
+      `UPDATE news_sources
+         SET custom_url = 'https://www.coindesk.com/arc/outboundfeeds/rss'
+         WHERE source_id = 'coindesk'
+           AND custom_url = 'https://www.coindesk.com/arc/outboundfeeds/rss/'`,
+    );
+  },
+};
+
 export const DB_MIGRATIONS: ReadonlyArray<Migration<Database>> = [
   baselineDbMigration,
   proactiveCooldownsMigration,
@@ -253,6 +270,7 @@ export const DB_MIGRATIONS: ReadonlyArray<Migration<Database>> = [
   addXFollowsEnabledSourceMigration,
   addCronJobsMigration,
   reshapeArticlesMigration,
+  fixCoindeskRssUrlMigration,
 ];
 
 // ---------------------------------------------------------------------------

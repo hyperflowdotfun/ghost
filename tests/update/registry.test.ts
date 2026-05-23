@@ -6,7 +6,7 @@ import {
 } from "../../src/update/registry.js";
 
 describe("registry", () => {
-  test("DEFAULT_REGISTRY_URL points at registry.npmjs.org", () => {
+  test("DEFAULT_REGISTRY_URL points at the public npm registry", () => {
     expect(DEFAULT_REGISTRY_URL).toBe("https://registry.npmjs.org/");
   });
 
