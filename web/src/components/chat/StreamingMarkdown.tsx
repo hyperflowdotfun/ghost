@@ -4,7 +4,7 @@ import { code } from '@streamdown/code';
 import { createMathPlugin } from '@streamdown/math';
 import 'katex/dist/katex.min.css';
 
-const math = createMathPlugin({ singleDollarTextMath: true });
+const math = createMathPlugin({ singleDollarTextMath: false });
 import { LinkPreviewModal } from './LinkPreviewModal';
 import { ChartDataProvider } from './ChartDataContext';
 import { useChartDataStore, chartDataKey } from './ChartDataContext-internals';

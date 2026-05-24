@@ -288,6 +288,7 @@ export async function startDaemon(options: DaemonOptions): Promise<void> {
     channelManager: runtime.channelManager,
     pairingStore: runtime.pairingStore,
     sessionManager: runtime.sessionManager,
+    tradingClient: runtime.tradingClient,
     logger: logger.child({ module: "cron-delivery" }),
   }));
 

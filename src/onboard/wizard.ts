@@ -612,11 +612,10 @@ export async function runWizard(daemonOptions: WizardOptions): Promise<void> {
 /**
  * Resolve a detected IANA tz to a row in the curated TIMEZONES list.
  *
- * Direct id match first; otherwise compare live UTC offsets so e.g.
- * "Asia/Ho_Chi_Minh" (not in the Windows list) lands on the first row
- * sharing its current offset — "(UTC+07:00) Bangkok, Hanoi, Jakarta".
- * No hardcoded aliases — offset is computed at runtime, so DST and
- * future zone splits are handled correctly.
+ * Direct id match first; otherwise compare live UTC offsets so an IANA id
+ * not in the Windows curated list lands on the first row sharing its
+ * current offset. No hardcoded aliases — offset is computed at runtime,
+ * so DST and future zone splits are handled correctly.
  */
 function resolveDetectedToEntry(detected: string): string {
   if (findTimezoneById(detected)) return detected;

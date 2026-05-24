@@ -311,6 +311,7 @@ describe("createCronDeliveryHandler — web delivery (no telegram pairing)", () 
       channelManager: makeManager(false),
       pairingStore: makePairingStore(),
       sessionManager: new SessionManagerStub() as never,
+      tradingClient: { address: "0xtest" } as never,
       logger: makeLogger() as never,
     };
   });
@@ -373,13 +374,19 @@ describe("createCronDeliveryHandler — web delivery (no telegram pairing)", () 
     expect(result).toBe("Morning briefing text here");
   });
 
-  test("empty session → no language-reference block in runner message", async () => {
-    // Default deps use SessionManagerStub() with no user texts.
+  test("empty session → English fallback directive (no recent-messages block)", async () => {
+    // Default deps use SessionManagerStub() with no user texts. Runner.call
+    // clears state.messages, so without an explicit directive the model
+    // would infer language from the UTC offset in runtime context — landing
+    // on whatever language the offset's region speaks. The fallback
+    // short-circuits that inference.
     const handler = createCronDeliveryHandler(deps);
     await handler(makeJob());
     const message = runner.calls[0].message;
+    expect(message).toContain("Respond in English");
     expect(message).not.toContain("Recent user messages");
-    expect(message).not.toContain("language reference");
+    // English fallback must precede the reminder/task content.
+    expect(message.indexOf("Respond in English")).toBeLessThan(message.indexOf("natural message"));
   });
 
   test("session with user messages → prepended language-reference block (verbatim pass-through)", async () => {
@@ -421,6 +428,7 @@ describe("createCronDeliveryHandler — empty/whitespace response", () => {
       channelManager: makeManager(false),
       pairingStore: makePairingStore(),
       sessionManager: new SessionManagerStub() as never,
+      tradingClient: { address: "0xtest" } as never,
       logger: makeLogger() as never,
     };
   }
@@ -459,6 +467,7 @@ describe("createCronDeliveryHandler — CronTool context wrapping", () => {
       channelManager: makeManager(false),
       pairingStore: makePairingStore(),
       sessionManager: new SessionManagerStub() as never,
+      tradingClient: { address: "0xtest" } as never,
       logger: makeLogger() as never,
     };
     const handler = createCronDeliveryHandler(deps);
@@ -480,6 +489,7 @@ describe("createCronDeliveryHandler — CronTool context wrapping", () => {
       channelManager: makeManager(false),
       pairingStore: makePairingStore(),
       sessionManager: new SessionManagerStub() as never,
+      tradingClient: { address: "0xtest" } as never,
       logger: makeLogger() as never,
     };
     const handler = createCronDeliveryHandler(deps);
@@ -497,6 +507,7 @@ describe("createCronDeliveryHandler — CronTool context wrapping", () => {
       channelManager: makeManager(false),
       pairingStore: makePairingStore(),
       sessionManager: new SessionManagerStub() as never,
+      tradingClient: { address: "0xtest" } as never,
       logger: makeLogger() as never,
     };
     const handler = createCronDeliveryHandler(deps);
@@ -521,6 +532,7 @@ describe("createCronDeliveryHandler — telegram delivery (paired allowlist)", (
       channelManager: makeManager(true),
       pairingStore: makePairingStore(["111", "222"]),
       sessionManager: new SessionManagerStub() as never,
+      tradingClient: { address: "0xtest" } as never,
       logger: makeLogger() as never,
     });
     await handler(makeJob());
@@ -555,6 +567,7 @@ describe("createCronDeliveryHandler — telegram delivery (paired allowlist)", (
       channelManager: makeManager(true),
       pairingStore: makePairingStore(["111", "222"]),
       sessionManager: new SessionManagerStub() as never,
+      tradingClient: { address: "0xtest" } as never,
       logger: makeLogger() as never,
     });
     await handler(makeJob("morning-briefing"));
@@ -574,6 +587,7 @@ describe("createCronDeliveryHandler — telegram delivery (paired allowlist)", (
       channelManager: makeManager(true),
       pairingStore: makePairingStore(),
       sessionManager: new SessionManagerStub() as never,
+      tradingClient: { address: "0xtest" } as never,
       logger: makeLogger() as never,
     });
     await handler(makeJob());
@@ -594,6 +608,7 @@ describe("createCronDeliveryHandler — telegram delivery (paired allowlist)", (
       channelManager: makeManager(true),
       pairingStore: makePairingStore(["*"]),
       sessionManager: new SessionManagerStub() as never,
+      tradingClient: { address: "0xtest" } as never,
       logger: makeLogger() as never,
     });
     await handler(makeJob());
@@ -602,3 +617,58 @@ describe("createCronDeliveryHandler — telegram delivery (paired allowlist)", (
     expect(eventBus.published).toHaveLength(1);
   });
 });
+
+describe("createCronDeliveryHandler — wallet gate", () => {
+  // Recap reviews today's trades + open positions → strictly needs a wallet.
+  // Briefing covers news + market signals + watchlist → runs without a wallet
+  // (still useful to a not-yet-onboarded user).
+
+  function makeWalletDeps(address: string): CronDeliveryDeps {
+    return {
+      runner: new RunnerStub("text") as never,
+      contextBuilder: new ContextBuilderStub() as never,
+      bus: new BusSpy() as never,
+      eventBus: new EventBusSpy() as never,
+      tools: new ToolRegistryStub() as never,
+      channelManager: makeManager(false),
+      pairingStore: makePairingStore(),
+      sessionManager: new SessionManagerStub() as never,
+      tradingClient: { address } as never,
+      logger: makeLogger() as never,
+    };
+  }
+
+  test("evening-recap skipped when address is empty", async () => {
+    const deps = makeWalletDeps("");
+    const runner = deps.runner as unknown as RunnerStub;
+    const handler = createCronDeliveryHandler(deps);
+    const out = await handler(makeJob("evening-recap"));
+    expect(out).toBeNull();
+    expect(runner.calls).toHaveLength(0);
+  });
+
+  test("evening-recap does not publish to eventBus when no wallet is connected", async () => {
+    const deps = makeWalletDeps("");
+    const eventBus = deps.eventBus as unknown as EventBusSpy;
+    const handler = createCronDeliveryHandler(deps);
+    await handler(makeJob("evening-recap"));
+    expect(eventBus.published).toHaveLength(0);
+  });
+
+  test("evening-recap proceeds when wallet is connected", async () => {
+    const deps = makeWalletDeps("0xabc");
+    const runner = deps.runner as unknown as RunnerStub;
+    const handler = createCronDeliveryHandler(deps);
+    await handler(makeJob("evening-recap"));
+    expect(runner.calls).toHaveLength(1);
+  });
+
+  test("morning-briefing proceeds even without a wallet (news + market work)", async () => {
+    const deps = makeWalletDeps("");
+    const runner = deps.runner as unknown as RunnerStub;
+    const handler = createCronDeliveryHandler(deps);
+    await handler(makeJob("morning-briefing"));
+    expect(runner.calls).toHaveLength(1);
+  });
+});
+

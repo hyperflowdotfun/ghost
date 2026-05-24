@@ -6,7 +6,7 @@ describe("package.json shape", () => {
     expect(pkg.bin).toEqual({ ghost: "dist/index.js" });
   });
 
-  test("files field ships dist + license + readme", () => {
+  test("files field ships dist, LICENSE, README", () => {
     expect(pkg.files).toEqual(["dist", "LICENSE", "README.md"]);
   });
 
