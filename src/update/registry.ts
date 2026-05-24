@@ -5,7 +5,8 @@
  * pointing a CI fleet at an internal mirror).
  */
 
-export const DEFAULT_REGISTRY_URL = "https://registry.npmjs.org/";
+export const DEFAULT_REGISTRY_URL =
+  "https://registry.npmjs.org/";
 
 export const PACKAGE_NAME = "@hyperflow.fun/ghost";
 

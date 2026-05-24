@@ -66,9 +66,9 @@ Rules:
 
 When you need to show a formula (RSI, Kelly criterion, EMA smoothing, etc.):
 
-- **Block formulas: use `$$ ... $$`.** Reserve for multi-symbol expressions where typeset rendering helps comprehension (Kelly, volatility, MACD definition).
-- **Inline math: use `$ x $`.** Renders typeset inline — works inside table cells, captions, and flowing prose. Examples: `$R_p$`, `$\sigma_p$`, `$R_p - R_f$`.
-- **Don't use `\[ ... \]` or `\( ... \)` (LaTeX-escape delimiters).** The renderer normalises them but `\[ ... \]` introduces extra line breaks. Use `$$ ... $$` and `$ ... $` directly.
+- **Always use `$$ ... $$` for math — both block and inline.** Block when the expression sits alone in its own paragraph (surrounded by blank lines); inline when it sits inside a sentence, table cell, or caption. Examples: inline `$$R_p$$`, `$$\sigma_p$$`, `$$R_p - R_f$$`; block reserved for multi-symbol expressions where typeset rendering aids comprehension (Kelly, volatility, MACD).
+- **Never use single `$ ... $` for math.** Single-dollar text math is disabled — it renders as literal text. Currency like `$50,000` passes through verbatim.
+- **Don't use `\[ ... \]` or `\( ... \)` (LaTeX-escape delimiters).** The renderer normalises them but `\[ ... \]` introduces extra line breaks. Use `$$ ... $$` directly.
 
 ## Core Rules
 

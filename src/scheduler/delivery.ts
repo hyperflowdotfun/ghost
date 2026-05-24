@@ -10,6 +10,7 @@ import type { ToolRegistry } from "../tools/registry.js";
 import type { PairingStore } from "../pairing/store.js";
 import type { ChannelManager } from "../channels/manager.js";
 import type { SessionManager } from "../session/manager.js";
+import type { ITradingClient } from "../services/interfaces/trading-client.js";
 import { MAIN_SESSION_KEY } from "../session/session.js";
 import { getOutboundChannels, dispatchOutbound } from "../channels/index.js";
 import { isCronAware } from "../tools/context-aware.js";
@@ -43,8 +44,21 @@ export interface CronDeliveryDeps {
   channelManager: ChannelManager;
   pairingStore: PairingStore;
   sessionManager: SessionManager;
+  tradingClient: ITradingClient;
   logger: Logger;
 }
+
+/**
+ * Job names that strictly require a connected wallet — they review the user's
+ * trades and positions, so without an address there's nothing to summarize.
+ * Briefings (news + market signals + watchlist) fire even without a wallet
+ * because they're still useful to a not-yet-onboarded user.
+ *
+ * Hardcoded set rather than a payload flag to avoid a schema migration in
+ * `scheduler/storage.ts` for the only portfolio-centric job we ship today.
+ * Generalize to `payload.requiresWallet` if more recap-style jobs land.
+ */
+const WALLET_REQUIRED_JOBS = new Set(["evening-recap"]);
 
 /**
  * Pull up to N most recent user-authored text snippets from the main session.
@@ -89,7 +103,15 @@ export function createCronDeliveryHandler(
   deps: CronDeliveryDeps,
 ): (job: CronJob) => Promise<string | null> {
   return async (job: CronJob): Promise<string | null> => {
-    const { runner, contextBuilder, bus, eventBus, tools, channelManager, pairingStore, sessionManager, logger } = deps;
+    const { runner, contextBuilder, bus, eventBus, tools, channelManager, pairingStore, sessionManager, tradingClient, logger } = deps;
+
+    // Wallet gate for portfolio-centric jobs (e.g. recap). Without an
+    // address those jobs have nothing to summarize. Briefings still run —
+    // news, market signals, and watchlist work fine without a wallet.
+    if (WALLET_REQUIRED_JOBS.has(job.name) && !tradingClient.address) {
+      logger.debug({ job: job.name }, "cron: no wallet connected, skipping");
+      return null;
+    }
 
     const cronTool = tools.get("cron");
     if (isCronAware(cronTool)) {
@@ -99,12 +121,18 @@ export function createCronDeliveryHandler(
     try {
       const activeChannels = getOutboundChannels({ channelManager, pairingStore, logger });
 
-      // Language anchor: surface recent user messages verbatim so the model
-      // can detect the trader's language. Without this, Runner.call clears
-      // state.messages and the model only sees the English task prompt.
+      // Language anchor. Runner.call clears state.messages, so without an
+      // explicit signal the model falls back to inferring language from
+      // runtime context (UTC offset) — and lands on whatever language the
+      // offset's region speaks. Two modes:
+      //   - Have recent user messages → use them verbatim as the reference
+      //     for language + tone.
+      //   - Session is empty → emit an explicit English fallback directive.
+      //     Once the user chats in any other language, the reference block
+      //     populates and overrides this default.
       const recentUser = snapshotRecentUserMessages(sessionManager, LANG_REFERENCE_MAX_MESSAGES);
       const langRefBlock = recentUser.length === 0
-        ? ""
+        ? "Respond in English (no recent chat history to infer the trader's language from).\n\n"
         : "Recent user messages (language reference only — do NOT reply to these, " +
           "use them only to match the trader's language and tone):\n" +
           recentUser.map((t) => `- ${t}`).join("\n") +
