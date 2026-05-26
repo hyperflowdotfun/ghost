@@ -1,8 +1,15 @@
 /**
- * HyperliquidSource — unified WS + REST price source for Hyperliquid perp.
+ * HyperliquidSource — subscribe-based WS + REST price source for Hyperliquid perp.
  *
- * Exposes a single PriceSource to the composite. Internally, it runs two
- * transports and orchestrates WS→REST fallback itself:
+ * The class does NOT implement `PriceSource` because that interface is
+ * single-callback. The `asHlPriceSource()` factory at the bottom of this
+ * file wraps the source into a `PriceSource` view; multiple consumers
+ * (composite trading feed, watchlist UI fan-out) each register their own
+ * listener via `subscribe()` and share ONE live WS/REST pair (refcount-
+ * driven lifecycle, symmetric with BinanceSource).
+ *
+ * Internally, it runs two transports and orchestrates WS→REST fallback
+ * itself:
  *
  *   - WS transport: `assetCtxs` subscription via @nktkas/hyperliquid
  *     (primary). Emits **mark price** per perp asset, not mid — Ghost is
@@ -36,7 +43,6 @@ import type { ITradingClient, ITradingSubscription } from "../../interfaces/trad
 import type { PriceSource, PriceTickCallback } from "../types.js";
 
 export interface HyperliquidSourceOptions {
-  testnet?: boolean;
   tradingClient: ITradingClient;
   logger: Logger;
   /** REST poll interval while in fallback mode. Default 5s. */
@@ -54,11 +60,7 @@ const DEFAULT_WS_STALE_MS = 10_000;
 const DEFAULT_WS_STABILITY_MS = 5_000;
 const DEFAULT_HEALTH_CHECK_INTERVAL_MS = 1_000;
 
-export class HyperliquidSource implements PriceSource {
-  readonly name = "hyperliquid";
-  readonly priority = 0;
-
-  private readonly testnet: boolean;
+export class HyperliquidSource {
   private readonly tradingClient: ITradingClient;
   private readonly log: Logger;
   private readonly restIntervalMs: number;
@@ -66,8 +68,12 @@ export class HyperliquidSource implements PriceSource {
   private readonly wsStabilityMs: number;
   private readonly healthCheckIntervalMs: number;
 
-  private onTick: PriceTickCallback | null = null;
-  private stopped = true;
+  private readonly subs = new Set<PriceTickCallback>();
+  private shuttingDown = false;
+  /** True while WS subscription / REST / health loop are armed. */
+  private running = false;
+  /** Set while ensureStarted() is in flight (WS handshake + hydration). */
+  private startInFlight: Promise<void> | null = null;
 
   // --- WS state ---
   private wsSubscription: ITradingSubscription | null = null;
@@ -85,18 +91,31 @@ export class HyperliquidSource implements PriceSource {
   /** Wall-clock marker for when we last saw the WS tick. Used to decide if
    *  "WS has been stable for wsStabilityMs" when deciding to deactivate REST. */
   private wsHealthySinceMs = 0;
-  /** Captured at start() so cold-start fallback uses wall time, not tick time. */
+  /** Captured at ensureStarted() so cold-start fallback uses wall time, not tick time. */
   private startedAt = 0;
 
   constructor(opts: HyperliquidSourceOptions) {
-    // testnet stored for future use (e.g. if tradingClient exposes a testnet flag)
-    this.testnet = opts.testnet ?? false;
     this.tradingClient = opts.tradingClient;
     this.log = opts.logger;
     this.restIntervalMs = opts.restIntervalMs ?? DEFAULT_REST_INTERVAL_MS;
     this.wsStaleMs = opts.wsStaleMs ?? DEFAULT_WS_STALE_MS;
     this.wsStabilityMs = opts.wsStabilityMs ?? DEFAULT_WS_STABILITY_MS;
     this.healthCheckIntervalMs = opts.healthCheckIntervalMs ?? DEFAULT_HEALTH_CHECK_INTERVAL_MS;
+  }
+
+  /**
+   * Register a tick listener. First subscribe opens the WS + arms the
+   * health loop; subsequent subscribes simply register additional
+   * callbacks. Returns an unsubscribe fn — last unsubscribe tears
+   * everything down (refcount-driven, symmetric with BinanceSource).
+   */
+  subscribe(cb: PriceTickCallback): () => void {
+    this.subs.add(cb);
+    void this.ensureStarted();
+    return () => {
+      this.subs.delete(cb);
+      this.maybeStop();
+    };
   }
 
   getLastTickAt(): number {
@@ -108,50 +127,68 @@ export class HyperliquidSource implements PriceSource {
     return this.restPolling;
   }
 
-  async start(onTick: PriceTickCallback): Promise<void> {
-    if (!this.stopped) return; // already running
-    this.stopped = false;
-    this.onTick = onTick;
-    this.wsRetryCount = 0;
-    this.startedAt = Date.now();
-    this.wsHealthySinceMs = 0;
+  /** Public escape hatch — drop all subscribers + tear down regardless of
+   *  refcount. Used by daemon shutdown and tests; symmetric with
+   *  BinanceSource.shutdown. */
+  async shutdown(): Promise<void> {
+    this.subs.clear();
+    await this.teardown();
+  }
 
-    this.log.info({
-      wsStaleMs: this.wsStaleMs,
-      restIntervalMs: this.restIntervalMs,
-    }, "hyperliquid source starting (WS primary, REST dormant)");
+  /**
+   * Open WS + arm health loop on first subscribe. Idempotent: concurrent
+   * subscribes share the same startInFlight promise so we never open two
+   * WS connections.
+   */
+  private async ensureStarted(): Promise<void> {
+    if (this.running) return;
+    if (this.startInFlight) return this.startInFlight;
+    this.startInFlight = (async () => {
+      this.shuttingDown = false;
+      this.running = true;
+      this.wsRetryCount = 0;
+      this.startedAt = Date.now();
+      this.wsHealthySinceMs = 0;
 
-    // Connect WS first so it can stream deltas while REST hydration is in flight.
-    await this.connectWs();
-    // Raced with stop() during the WS handshake — bail before REST hydration
-    // and arming the reconcile loop so we don't leave live timers on a stopped source.
-    if (this.stopped) return;
+      this.log.info({
+        wsStaleMs: this.wsStaleMs,
+        restIntervalMs: this.restIntervalMs,
+      }, "hyperliquid source starting (WS primary, REST dormant)");
 
-    await this.hydrateFromRest();
+      // Connect WS first so it can stream deltas while REST hydration is in flight.
+      await this.connectWs();
+      // Raced with maybeStop()/shutdown() during the WS handshake — bail
+      // before REST hydration and arming the reconcile loop.
+      if (this.shuttingDown) return;
 
-    if (this.stopped) return;
+      await this.hydrateFromRest();
+      if (this.shuttingDown) return;
 
-    // Arm the internal fallback loop.
-    this.healthTimer = setInterval(() => { this.reconcileTransports(); }, this.healthCheckIntervalMs);
+      // Arm the internal fallback loop.
+      this.healthTimer = setInterval(() => { this.reconcileTransports(); }, this.healthCheckIntervalMs);
+    })();
+    try {
+      await this.startInFlight;
+    } finally {
+      this.startInFlight = null;
+    }
   }
 
   /**
    * One-shot REST snapshot at startup. Pushes every ticker through the normal
-   * onTick path so the cache is hot before start() resolves — no gateway-level
-   * gate needed. Failure is non-fatal: WS will catch up.
+   * dispatch path so the cache is hot before subscribe() resolves — no
+   * gateway-level gate needed. Failure is non-fatal: WS will catch up.
    */
   private async hydrateFromRest(): Promise<void> {
     try {
       const tickers = await this.tradingClient.getAllTickers();
-      if (this.stopped) return;
-      const callback = this.onTick;
-      if (!callback) return;
+      if (this.shuttingDown) return;
       for (const t of tickers) {
         if (!Number.isFinite(t.markPrice)) continue;
         const prev = Number.isFinite(t.prevDayPrice) && t.prevDayPrice > 0
           ? t.prevDayPrice
           : undefined;
-        callback(t.symbol, t.markPrice, prev);
+        this.dispatch(t.symbol, t.markPrice, prev);
       }
       this.log.info({ count: tickers.length }, "hyperliquid source: REST hydration complete");
     } catch (err) {
@@ -159,9 +196,15 @@ export class HyperliquidSource implements PriceSource {
     }
   }
 
-  async stop(): Promise<void> {
-    if (this.stopped) return;
-    this.stopped = true;
+  private maybeStop(): void {
+    if (this.subs.size > 0) return;
+    void this.teardown();
+  }
+
+  private async teardown(): Promise<void> {
+    if (!this.running && !this.startInFlight) return;
+    this.shuttingDown = true;
+    this.running = false;
 
     if (this.healthTimer) {
       clearInterval(this.healthTimer);
@@ -173,28 +216,37 @@ export class HyperliquidSource implements PriceSource {
     }
     this.deactivateRest(); // idempotent
     await this.cleanupWs();
+    this.lastWsTickAt = 0;
+    this.lastRestTickAt = 0;
+    this.startedAt = 0;
+    this.wsHealthySinceMs = 0;
+  }
 
-    this.onTick = null;
+  /** Fan out a tick to every current subscriber. Snapshot the iterable so
+   *  a subscriber unsubscribing mid-dispatch doesn't mutate the iterator. */
+  private dispatch(symbol: string, price: number, prevDayPrice: number | undefined): void {
+    if (this.subs.size === 0) return;
+    for (const cb of this.subs) cb(symbol, price, prevDayPrice);
   }
 
   // --- WS transport ---------------------------------------------------------
 
   private async connectWs(): Promise<void> {
-    if (this.stopped) return;
+    if (this.shuttingDown) return;
     try {
       // Ensure meta is loaded so dexUniverses is populated before the first
       // allDexsAssetCtxs frame arrives. ensureMeta is single-flight so
       // concurrent callers are fine.
       await this.tradingClient.ensureMeta();
 
-      if (this.stopped) return;
+      if (this.shuttingDown) return;
 
       const sub = await this.tradingClient.subscribeAllDexsAssetCtxs(
         (event) => this.handleAllDexsAssetCtxsEvent(event),
       );
 
-      if (this.stopped) {
-        // Raced with stop() during the await — tear down immediately.
+      if (this.shuttingDown) {
+        // Raced with teardown during the await — tear down immediately.
         try { await sub.unsubscribe(); } catch { /* ignore */ }
         return;
       }
@@ -221,9 +273,8 @@ export class HyperliquidSource implements PriceSource {
   handleAllDexsAssetCtxsEvent(
     event: { ctxs: ReadonlyArray<readonly [dex: string, ctxs: ReadonlyArray<{ markPx?: string | number | null; prevDayPx?: string | number | null; [k: string]: unknown }>]> },
   ): void {
-    if (this.stopped) return;
-    const callback = this.onTick;
-    if (!callback) return;
+    if (this.shuttingDown) return;
+    if (this.subs.size === 0) return;
 
     const dexUniverses = this.tradingClient.getDexUniverses();
     const now = Date.now();
@@ -243,7 +294,7 @@ export class HyperliquidSource implements PriceSource {
         const prevDay = prevRaw != null
           ? (typeof prevRaw === "string" ? parseFloat(prevRaw) : Number(prevRaw))
           : undefined;
-        callback(symbol, mark, Number.isFinite(prevDay) ? prevDay : undefined);
+        this.dispatch(symbol, mark, Number.isFinite(prevDay) ? prevDay : undefined);
         anyEmitted = true;
       }
     }
@@ -251,13 +302,13 @@ export class HyperliquidSource implements PriceSource {
   }
 
   private scheduleWsRetry(): void {
-    if (this.stopped || this.wsRetryTimer) return;
+    if (this.shuttingDown || this.wsRetryTimer) return;
     const delay = Math.min(5_000 * 2 ** this.wsRetryCount, 60_000);
     this.wsRetryCount++;
     this.log.info({ delay, attempt: this.wsRetryCount }, "hyperliquid source: WS retry scheduled");
     this.wsRetryTimer = setTimeout(async () => {
       this.wsRetryTimer = null;
-      if (this.stopped) return;
+      if (this.shuttingDown) return;
       await this.cleanupWs();
       await this.connectWs();
     }, delay);
@@ -273,7 +324,7 @@ export class HyperliquidSource implements PriceSource {
   // --- REST transport -------------------------------------------------------
 
   private activateRest(): void {
-    if (this.stopped) return;
+    if (this.shuttingDown) return;
     if (this.restPolling) return;
     this.restPolling = true;
     this.log.info({ intervalMs: this.restIntervalMs }, "hyperliquid source: REST fallback activated");
@@ -293,23 +344,19 @@ export class HyperliquidSource implements PriceSource {
   }
 
   private async restTick(): Promise<void> {
-    if (this.stopped || !this.restPolling) return;
+    if (this.shuttingDown || !this.restPolling) return;
     try {
       const tickers = await this.tradingClient.getAllTickers();
-      if (this.stopped || !this.restPolling) return;
-      // Snapshot the callback so a concurrent stop() clearing this.onTick
-      // mid-loop can't null-dereference.
-      const callback = this.onTick;
-      if (!callback) return;
+      if (this.shuttingDown || !this.restPolling) return;
       const now = Date.now();
       let anyEmitted = false;
       for (const t of tickers) {
-        if (this.stopped || !this.restPolling) return;
+        if (this.shuttingDown || !this.restPolling) return;
         if (!Number.isFinite(t.markPrice)) continue;
         const prevDay = Number.isFinite(t.prevDayPrice) && t.prevDayPrice > 0
           ? t.prevDayPrice
           : undefined;
-        callback(t.symbol, t.markPrice, prevDay);
+        this.dispatch(t.symbol, t.markPrice, prevDay);
         anyEmitted = true;
       }
       // Only advance lastRestTickAt if at least one tick actually made it
@@ -323,7 +370,7 @@ export class HyperliquidSource implements PriceSource {
     } finally {
       // Invariant: next setTimeout is armed only after this poll resolves —
       // polls can't overlap even if getAllTickers is slower than intervalMs.
-      if (!this.stopped && this.restPolling) {
+      if (!this.shuttingDown && this.restPolling) {
         this.restTimer = setTimeout(() => this.restTick(), this.restIntervalMs);
       }
     }
@@ -343,7 +390,7 @@ export class HyperliquidSource implements PriceSource {
    * and forth on transient recoveries.
    */
   private reconcileTransports(): void {
-    if (this.stopped) return;
+    if (this.shuttingDown) return;
     const now = Date.now();
     const wsAge = this.lastWsTickAt === 0
       ? now - this.startedAt
@@ -418,11 +465,28 @@ export class HyperliquidSource implements PriceSource {
       "hyperliquid source: WS silent past watchdog, forcing reconnect",
     );
     // Fire-and-forget is fine — cleanupWs + scheduleWsRetry both already
-    // handle the stopped flag internally.
+    // handle the shuttingDown flag internally.
     void this.cleanupWs().then(() => {
-      if (this.stopped) return;
+      if (this.shuttingDown) return;
       this.scheduleWsRetry();
     });
   }
 }
 
+/**
+ * Factory that wraps a `HyperliquidSource` into a `PriceSource` view —
+ * symmetric with `binance.ts`. Call once per consumer; each call
+ * yields an independent handle with its own `unsub` closure, so a feed's
+ * `stop()` releases only that feed's subscription. The underlying WS/REST
+ * pair stays single (refcount in HyperliquidSource).
+ */
+export function asHlPriceSource(hl: HyperliquidSource): PriceSource {
+  let unsub: (() => void) | null = null;
+  return {
+    name: "hyperliquid",
+    priority: 0,
+    getLastTickAt: () => hl.getLastTickAt(),
+    start: async (onTick) => { unsub = hl.subscribe(onTick); },
+    stop: async () => { unsub?.(); unsub = null; },
+  };
+}

@@ -88,6 +88,8 @@ function makeHarness(opts: { article?: NewsArticle; runnerReturn?: string | (() 
     newsService,
     preferenceStore,
     watchlist: {} as any,
+    intel: {} as any,
+    binance: undefined,
     logger: noopLogger,
     tokensSnapshot: { build: () => ({ tokens: [], prices: {}, prevDayPrices: {}, maxLeverages: {} }) } as any,
     priceCache: { get: () => undefined, set: () => {} } as any,

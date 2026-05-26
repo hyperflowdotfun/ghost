@@ -30,12 +30,16 @@ export function classifyOrderKind(o: { orderType: string; reduceOnly: boolean })
   return "pending_limit";
 }
 
-export function createAccountTools(
-  hl: ITradingClient,
-  walletStore: IWalletStore,
-  saveWalletConfig?: (address: string, privateKey: string, testnet: boolean) => Promise<void>,
-  disconnectWallet?: () => Promise<{ address: string } | null>,
-): AgentTool[] {
+export interface AccountToolDeps {
+  hl: ITradingClient;
+  walletStore: IWalletStore;
+  testnet: boolean;
+  saveWalletConfig?: (address: string, privateKey: string) => Promise<void>;
+  disconnectWallet?: () => Promise<{ address: string } | null>;
+}
+
+export function createAccountTools(deps: AccountToolDeps): AgentTool[] {
+  const { hl, walletStore, testnet, saveWalletConfig, disconnectWallet } = deps;
   return [
     defineTool({
       name: "ghost_connect_wallet",
@@ -48,22 +52,19 @@ export function createAccountTools(
       parameters: Type.Object({
         address: Type.String({ description: "Hyperliquid wallet address (0x...)" }),
         privateKey: Type.String({ description: "Wallet private key (0x...)" }),
-        testnet: Type.Optional(Type.Boolean({ description: "Use testnet. Default false." })),
       }),
       async execute(_toolCallId, params) {
         try {
-          const testnet = params.testnet ?? false;
           hl.connect({
             address: params.address,
             privateKey: params.privateKey,
             testnet,
           });
           if (saveWalletConfig) {
-            await saveWalletConfig(params.address, params.privateKey, testnet);
+            await saveWalletConfig(params.address, params.privateKey);
           }
-          const net = testnet ? "testnet" : "mainnet";
           return textResult(
-            `Wallet connected (${net}, read+write).\n` +
+            `Wallet connected (${testnet ? "testnet" : "mainnet"}, read+write).\n` +
             `Address: ${truncateAddress(params.address)}\n` +
             `Wallet saved (encrypted) — will reconnect on restart.`
           );

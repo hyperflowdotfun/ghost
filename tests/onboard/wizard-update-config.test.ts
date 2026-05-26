@@ -18,6 +18,7 @@ function seededConfig(): Config {
   };
   c.gateway.rateLimitRpm = 120;
   c.security.allowedCommands = ["custom-cmd", "npx"];
+  c.mode = "paper";
   c.paper = { ...c.paper, enabled: true, initialBalance: 50000 };
   c.verbosity = 1;
   return c;
@@ -66,22 +67,34 @@ describe("applyUpdateModeChanges", () => {
     expect(next.verbosity).toBe(1);
   });
 
-  it("preserves existing paper when overlay.paper is undefined", () => {
+  it("preserves existing mode when overlay.mode is undefined", () => {
     const next = applyUpdateModeChanges(seededConfig(), {
       provider: "anthropic",
       model: "claude-opus-4-7",
     });
-    expect(next.paper.enabled).toBe(true);
+    expect(next.mode).toBe("paper");
     expect(next.paper.initialBalance).toBe(50000);
   });
 
-  it("overlays paper when provided", () => {
+  it("overlays mode + paperBalance when provided", () => {
     const next = applyUpdateModeChanges(seededConfig(), {
       provider: "anthropic",
       model: "claude-opus-4-7",
-      paper: { enabled: true, initialBalance: 100000, priceMonitorInterval: 5000, takerFee: 0.00045, makerFee: 0.00015 },
+      mode: "paper",
+      paperBalance: 100000,
     });
+    expect(next.mode).toBe("paper");
     expect(next.paper.initialBalance).toBe(100000);
+  });
+
+  it("switches to testnet without touching paper block", () => {
+    const next = applyUpdateModeChanges(seededConfig(), {
+      provider: "anthropic",
+      model: "claude-opus-4-7",
+      mode: "testnet",
+    });
+    expect(next.mode).toBe("testnet");
+    expect(next.paper.initialBalance).toBe(50000);
   });
 
   it("does not mutate the input config", () => {

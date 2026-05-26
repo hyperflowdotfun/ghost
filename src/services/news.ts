@@ -3,7 +3,7 @@
  */
 
 import type { Database } from "bun:sqlite";
-import type { WatchlistService } from "./watchlist.js";
+import type { WatchlistService } from "./watchlist/service.js";
 import type { CredentialStore } from "../config/credentials.js";
 import type { Logger } from "pino";
 import {

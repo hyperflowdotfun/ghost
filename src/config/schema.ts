@@ -137,6 +137,9 @@ export const observerSchema = z.object({
   liquidationProgressThreshold: z.coerce.number().min(0.1).max(0.99).default(0.8),
 });
 
+export const tradingMode = z.enum(["live", "testnet", "paper"]);
+export type TradingMode = z.infer<typeof tradingMode>;
+
 // ---------------------------------------------------------------------------
 // Top-level config schema
 // ---------------------------------------------------------------------------
@@ -149,6 +152,7 @@ export const configSchema = z.object({
    * configs written before this field existed.
    */
   schemaVersion: z.coerce.number().int().positive().default(1),
+  mode: tradingMode.default("live"),
   provider: z.string().default("openrouter"),
   model: z.string().default("anthropic/claude-sonnet-4"),
   /** Optional base URL override — used by Ollama and self-hosted endpoints. */

@@ -38,7 +38,8 @@ import type { PreferenceStore } from "../services/preferences.js";
 import type { TimezoneService } from "../services/timezone.js";
 import type { SkillService } from "../services/skill-service.js";
 import { handleChartData, type ChartDataDeps } from "./chart-data.js";
-import type { WatchlistService } from "../services/watchlist.js";
+import type { WatchlistService } from "../services/watchlist/service.js";
+import type { IntelService } from "../services/intel.js";
 import type { EventBus } from "../bus/events.js";
 import type { MessageDispatcher } from "../channels/dispatcher.js";
 import type { MessageBus } from "../bus/queue.js";
@@ -49,8 +50,15 @@ import { ChannelManager } from "../channels/manager.js";
 import { WalletEvents } from "../events/wallet-events.js";
 import { TradingEvents } from "../events/trading-events.js";
 import { CompositePriceFeed } from "../services/price-feed/composite.js";
-import { HyperliquidSource } from "../services/price-feed/sources/hyperliquid.js";
+import { WatchlistPriceFeed } from "../services/watchlist/feed.js";
+import type { WatchlistPriceCache } from "../services/price-cache.js";
+import type { BinanceService } from "../services/binance.js";
+import { HyperliquidSource, asHlPriceSource } from "../services/price-feed/sources/hyperliquid.js";
 import { BinanceSource } from "../services/price-feed/sources/binance.js";
+import {
+  asMarkPriceSource,
+  asMiniTickerSource,
+} from "../services/price-feed/sources/binance.js";
 import type { PriceSource } from "../services/price-feed/types.js";
 import { TokensSnapshotService } from "../services/tokens-snapshot.js";
 import type { VersionCheck } from "../update/version-check.js";
@@ -94,12 +102,15 @@ export interface GatewayTradingDeps {
   alertRules: AlertRulesService;
   notifications: NotificationsService;
   priceCache: PriceCache;
+  watchlistPriceCache: WatchlistPriceCache;
+  binance: BinanceService;
   newsService: NewsService;
   rssDiscoveryService?: RssDiscoveryService;
   tweetService?: TweetService;
   xFollowService?: XFollowService;
   preferenceStore: PreferenceStore;
   watchlistService: WatchlistService;
+  intelService: IntelService;
   chartDataDeps?: ChartDataDeps;
 }
 
@@ -135,13 +146,29 @@ export interface GatewayHandle {
 /** TTL for pending agent keys. */
 const PENDING_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
-/** EIP-712 types for Hyperliquid ApproveAgent — shared between generate and confirm. */
-const approveAgentDomain = {
-  name: "HyperliquidSignTransaction",
-  version: "1",
+const APPROVE_AGENT_MAINNET = {
   chainId: 42161,
-  verifyingContract: "0x0000000000000000000000000000000000000000" as `0x${string}`,
+  signatureChainId: "0xa4b1",
+  hyperliquidChain: "Mainnet",
+  exchangeUrl: "https://api.hyperliquid.xyz/exchange",
 } as const;
+
+const APPROVE_AGENT_TESTNET = {
+  chainId: 998,
+  signatureChainId: "0x3e6",
+  hyperliquidChain: "Testnet",
+  exchangeUrl: "https://api.hyperliquid-testnet.xyz/exchange",
+} as const;
+
+function approveAgentDomain(testnet: boolean) {
+  const params = testnet ? APPROVE_AGENT_TESTNET : APPROVE_AGENT_MAINNET;
+  return {
+    name: "HyperliquidSignTransaction",
+    version: "1",
+    chainId: params.chainId,
+    verifyingContract: "0x0000000000000000000000000000000000000000" as `0x${string}`,
+  } as const;
+}
 
 const approveAgentTypes = {
   "HyperliquidTransaction:ApproveAgent": [
@@ -155,6 +182,8 @@ const approveAgentTypes = {
 export function createGateway(gatewayConfig: Config["gateway"], deps: GatewayDeps): GatewayHandle {
   /** Temporary storage for generated API wallet keys pending ApproveAgent confirmation. */
   const pendingAgentKeys = new Map<string, { privateKey: string; agentAddress: string; nonce: number; createdAt: number }>();
+
+  const isTestnet = deps.config.mode === "testnet";
 
   const rateLimiter = new RateLimiter(gatewayConfig.rateLimitRpm);
   const webDistDir = resolveWebDist();
@@ -177,8 +206,8 @@ export function createGateway(gatewayConfig: Config["gateway"], deps: GatewayDep
     timezoneService: deps.timezoneService,
     cronService: deps.cronService,
   });
-  const tokensSnapshot = new TokensSnapshotService(deps.tradingClient, deps.priceCache);
-  registerTradingMethods(registry.register.bind(registry), { tradingClient: deps.tradingClient, walletStore: deps.walletStore, alertRules: deps.alertRules, notifications: deps.notifications, newsService: deps.newsService, rssDiscovery: deps.rssDiscoveryService, tweetService: deps.tweetService, xFollowService: deps.xFollowService, preferenceStore: deps.preferenceStore, watchlist: deps.watchlistService, logger: deps.logger, tokensSnapshot, priceCache: deps.priceCache, runner: deps.runner });
+  const tokensSnapshot = new TokensSnapshotService(deps.tradingClient, deps.priceCache, deps.binance, deps.watchlistPriceCache);
+  registerTradingMethods(registry.register.bind(registry), { tradingClient: deps.tradingClient, walletStore: deps.walletStore, alertRules: deps.alertRules, notifications: deps.notifications, newsService: deps.newsService, rssDiscovery: deps.rssDiscoveryService, tweetService: deps.tweetService, xFollowService: deps.xFollowService, preferenceStore: deps.preferenceStore, watchlist: deps.watchlistService, intel: deps.intelService, binance: deps.config.priceFeed.binanceEnabled ? deps.binance : undefined, logger: deps.logger, tokensSnapshot, priceCache: deps.priceCache, runner: deps.runner });
   registerApprovalMethods(registry.register.bind(registry), { approvalManager: deps.approvalManager });
   registerToolApprovalMethods(registry.register.bind(registry), { approvalManager: deps.approvalManager });
   registerSkillsMethods(registry.register.bind(registry), { skillService: deps.skillService });
@@ -206,8 +235,8 @@ export function createGateway(gatewayConfig: Config["gateway"], deps: GatewayDep
   }
 
   // Broadcast watchlist changes (from agent tools or RPC) to all connected clients
-  deps.watchlistService.onChanged((action, symbol) => {
-    deps.eventBus.publish(TradingEvents.watchlistChanged({ action, symbol }));
+  deps.watchlistService.onChanged((action, symbol, source) => {
+    deps.eventBus.publish(TradingEvents.watchlistChanged({ action, symbol, source }));
   });
 
   // -- Price broadcasting: composite feed with priority-based failover ---
@@ -219,19 +248,28 @@ export function createGateway(gatewayConfig: Config["gateway"], deps: GatewayDep
   const priceFeedConfig = deps.config.priceFeed;
   const priceFeedLogger = deps.logger.child({ module: "price-feed" });
 
+  // ONE source instance per exchange — created at the top level, shared across
+  // every consumer via subscribe/unsubscribe adapters. Refcount inside each
+  // source keeps exactly one live WS+REST pair open while any consumer is
+  // attached.
+  //   - HyperliquidSource: trading composite consumes it for HL-canonical
+  //     primary; watchlist feed consumes it for the HL UI row.
+  //   - BinanceSource (combined WS): trading composite consumes the mark
+  //     adapter (HL-canonical translation for failover); watchlist feed
+  //     consumes the mini adapter (native Binance symbols + 24h-open).
+  const hl = new HyperliquidSource({
+    tradingClient: deps.tradingClient,
+    restIntervalMs: priceFeedConfig.hlRestIntervalMs,
+    logger: priceFeedLogger.child({ source: "hyperliquid" }),
+  });
+  const binance = priceFeedConfig.binanceEnabled
+    ? new BinanceSource({ logger: priceFeedLogger.child({ source: "binance" }) })
+    : null;
+
   function buildPriceSources(): PriceSource[] {
-    const sources: PriceSource[] = [
-      new HyperliquidSource({
-        testnet: false,
-        tradingClient: deps.tradingClient,
-        restIntervalMs: priceFeedConfig.hlRestIntervalMs,
-        logger: priceFeedLogger.child({ source: "hyperliquid" }),
-      }),
-    ];
-    if (priceFeedConfig.binanceEnabled) {
-      sources.push(new BinanceSource({
-        logger: priceFeedLogger.child({ source: "binance" }),
-      }));
+    const sources: PriceSource[] = [asHlPriceSource(hl)];
+    if (binance !== null) {
+      sources.push(asMarkPriceSource(binance));
     }
     return sources;
   }
@@ -243,6 +281,18 @@ export function createGateway(gatewayConfig: Config["gateway"], deps: GatewayDep
       stabilityWindowMs: priceFeedConfig.stabilityWindowMs,
     },
     priceFeedLogger,
+  );
+
+  // Watchlist feed consumes both sources explicitly via their adapters —
+  // each adapter is a separate subscriber on the underlying shared source,
+  // so HL and Binance ticks reach the watchlist symmetrically (no hidden
+  // piggyback through broadcastPrice).
+  const watchlistPriceFeed = new WatchlistPriceFeed(
+    [
+      asHlPriceSource(hl),
+      ...(binance !== null ? [asMiniTickerSource(binance)] : []),
+    ],
+    priceFeedLogger.child({ module: "watchlist-feed" }),
   );
 
   function broadcastPrice(symbol: string, price: number, prevDayPrice?: number) {
@@ -265,6 +315,10 @@ export function createGateway(gatewayConfig: Config["gateway"], deps: GatewayDep
     // fans out to all WS clients under the event.type topic. Calling
     // clientManager.broadcast here would double-emit each tick.
     deps.eventBus.publish(TradingEvents.priceUpdate({ symbol, price, prevDayPrice }));
+    // Source-tagged `trading.source.tick` for the watchlist UI is emitted
+    // by the WatchlistPriceFeed onTick callback below — both HL and Binance
+    // sources reach the watchlist via their own subscriptions there. No
+    // piggyback emit from broadcastPrice anymore.
   }
 
   async function startPriceFeed() {
@@ -273,22 +327,61 @@ export function createGateway(gatewayConfig: Config["gateway"], deps: GatewayDep
       return;
     }
     lastPrices.clear();
+    // One-shot REST snapshot for both sources to seed UI before WS frames
+    // arrive — avoids the 1-3s "--" window while streams connect. WS ticks
+    // overwrite as they land. Fetches concurrently to keep startup snappy.
+    const [hlTickers, binanceTickers] = await Promise.all([
+      deps.tradingClient.getAllTickers().catch((err) => {
+        priceFeedLogger.warn({ err }, "HL tickers backfill failed"); return [];
+      }),
+      priceFeedConfig.binanceEnabled
+        ? deps.binance.fetchTickers24hr()
+        : Promise.resolve([]),
+    ]);
+    // HL backfill: feeds the shared price cache + trading priceUpdate
+    // (via broadcastPrice) AND the watchlist's HL row (via the explicit
+    // sourceTick emit + watchlistPriceCache.set below). Symmetric with the
+    // binance backfill loop — both sources seed the watchlist UI before WS
+    // ticks land.
+    for (const t of hlTickers) {
+      broadcastPrice(t.symbol, t.markPrice, t.prevDayPrice);
+      deps.watchlistPriceCache.set("hyperliquid", t.symbol, t.markPrice, t.prevDayPrice);
+      deps.eventBus.publish(TradingEvents.sourceTick({
+        source: "hyperliquid", symbol: t.symbol, price: t.markPrice, prevDayPrice: t.prevDayPrice,
+      }));
+    }
+    for (const t of binanceTickers) {
+      deps.watchlistPriceCache.set("binance", t.symbol, t.price, t.prevDayPrice);
+      deps.eventBus.publish(TradingEvents.sourceTick({
+        source: "binance", symbol: t.symbol, price: t.price, prevDayPrice: t.prevDayPrice,
+      }));
+    }
     try {
       await compositeFeed.start((symbol, price, prevDayPrice) =>
         broadcastPrice(symbol, price, prevDayPrice));
     } catch (err) {
       priceFeedLogger.warn({ err }, "composite price feed failed to start");
     }
+    try {
+      await watchlistPriceFeed.start((source, symbol, price, prevDayPrice) => {
+        deps.watchlistPriceCache.set(source, symbol, price, prevDayPrice);
+        deps.eventBus.publish(TradingEvents.sourceTick({ source, symbol, price, prevDayPrice }));
+      });
+    } catch (err) {
+      priceFeedLogger.warn({ err }, "watchlist composite feed failed to start");
+    }
   }
 
   async function stopPriceFeed() {
     await compositeFeed.stop();
+    await watchlistPriceFeed.stop();
     lastPrices.clear();
     // Drop the shared cache too — its entries would silently grow stale
     // without a fresh tick source to refresh them, and stale data into
     // ghost_get_price would surprise the trader. Cache is rebuilt on
     // the next start.
     deps.priceCache.clear();
+    deps.watchlistPriceCache.clear();
   }
 
   // Keep the feed running whenever WS clients OR active alert rules exist —
@@ -336,12 +429,12 @@ export function createGateway(gatewayConfig: Config["gateway"], deps: GatewayDep
     // Wallet endpoints are unauthenticated. Deployment must restrict access
     // via gateway.host=127.0.0.1 (default) or an external ACL / tunnel.
     .post("/api/wallet/connect", async ({ body, set }) => {
-      const { address, testnet, source } = body as { address?: string; testnet?: boolean; source?: string };
+      const { address, source } = body as { address?: string; source?: string };
       if (!address || typeof address !== "string" || !address.startsWith("0x")) {
         set.status = 400; return { error: "Valid address required (0x...)" };
       }
       const walletSource = typeof source === "string" && source.length > 0 ? source : "unknown";
-      const isNew = await deps.walletStore.addWatch(address, testnet ?? false, walletSource);
+      const isNew = await deps.walletStore.addWatch(address, isTestnet, walletSource);
       if (isNew) {
         deps.eventBus.publish(WalletEvents.changed({ action: "connect", address }));
       }
@@ -358,7 +451,8 @@ export function createGateway(gatewayConfig: Config["gateway"], deps: GatewayDep
       const { privateKey, address: agentAddress } = generateApiWallet();
       const nonce = Date.now();
       pendingAgentKeys.set(addr, { privateKey, agentAddress, nonce, createdAt: Date.now() });
-      return { ok: true, agentAddress, nonce };
+      const params = isTestnet ? APPROVE_AGENT_TESTNET : APPROVE_AGENT_MAINNET;
+      return { ok: true, agentAddress, nonce, ...params };
     })
     .post("/api/wallet/confirm-agent", async ({ body, set }) => {
       const { address, signature } = body as { address?: string; signature?: string };
@@ -376,14 +470,14 @@ export function createGateway(gatewayConfig: Config["gateway"], deps: GatewayDep
         pendingAgentKeys.delete(addr);
         return { ok: true, reverted: true };
       }
-      // Verify the EIP-712 signature matches the wallet address
+      const params = isTestnet ? APPROVE_AGENT_TESTNET : APPROVE_AGENT_MAINNET;
       const valid = await verifyTypedData({
         address: address as `0x${string}`,
-        domain: approveAgentDomain,
+        domain: approveAgentDomain(isTestnet),
         types: approveAgentTypes,
         primaryType: "HyperliquidTransaction:ApproveAgent",
         message: {
-          hyperliquidChain: "Mainnet",
+          hyperliquidChain: params.hyperliquidChain,
           agentAddress: pending.agentAddress as `0x${string}`,
           agentName: "ghost",
           nonce: BigInt(pending.nonce),
@@ -397,7 +491,7 @@ export function createGateway(gatewayConfig: Config["gateway"], deps: GatewayDep
       const wallet = deps.walletStore.getWallet(addr);
       if (!wallet) { set.status = 400; return { error: "Wallet not found. Connect wallet again." }; }
       await deps.walletStore.enableTrading(addr, pending.agentAddress, pending.privateKey);
-      deps.tradingClient.connect({ address: addr, privateKey: pending.privateKey, testnet: wallet.testnet });
+      deps.tradingClient.connect({ address: addr, privateKey: pending.privateKey, testnet: isTestnet });
       deps.eventBus.publish(WalletEvents.changed({ action: "trading-enabled", address: addr }));
       return { ok: true };
     })
@@ -411,7 +505,7 @@ export function createGateway(gatewayConfig: Config["gateway"], deps: GatewayDep
       if (!wallet) { set.status = 404; return { error: "Wallet not found" }; }
       await deps.walletStore.remove(address);
       const nextDefault = await deps.walletStore.load();
-      if (nextDefault) { deps.tradingClient.connect(nextDefault); }
+      if (nextDefault) { deps.tradingClient.connect({ ...nextDefault, testnet: isTestnet }); }
       else { deps.tradingClient.disconnect(); }
       deps.eventBus.publish(WalletEvents.changed({ action: "remove", address }));
       return { ok: true, address };
@@ -424,7 +518,7 @@ export function createGateway(gatewayConfig: Config["gateway"], deps: GatewayDep
       if (wallet.status !== "trading") { set.status = 400; return { error: "Only trading-enabled wallets can be set as default" }; }
       deps.walletStore.setDefault(address);
       const data = await deps.walletStore.load();
-      if (data) deps.tradingClient.connect(data);
+      if (data) deps.tradingClient.connect({ ...data, testnet: isTestnet });
       deps.eventBus.publish(WalletEvents.changed({ action: "set-default", address }));
       return { ok: true, address };
     })
@@ -435,7 +529,7 @@ export function createGateway(gatewayConfig: Config["gateway"], deps: GatewayDep
       if (removed.length > 0) {
         const nextDefault = await deps.walletStore.load();
         if (nextDefault) {
-          deps.tradingClient.connect(nextDefault);
+          deps.tradingClient.connect({ ...nextDefault, testnet: isTestnet });
         } else {
           deps.tradingClient.disconnect();
         }

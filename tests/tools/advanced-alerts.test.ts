@@ -8,7 +8,7 @@ import { initDatabase } from "../../src/core/database.js";
 import { runDbMigrations } from "../../src/core/migrations/db.js";
 import { DB_MIGRATIONS } from "../../src/core/migrations/registry.js";
 import { AlertRulesService } from "../../src/services/alert-rules.js";
-import { WatchlistService } from "../../src/services/watchlist.js";
+import { WatchlistService } from "../../src/services/watchlist/service.js";
 import { createAdvancedTradingTools } from "../../src/tools/trading/advanced.js";
 import type { ITradingClient } from "../../src/services/interfaces/trading-client.js";
 import type { Ticker } from "../../src/services/interfaces/trading-types.js";
@@ -22,6 +22,9 @@ async function freshDb(): Promise<Database> {
 
 function fakeTradingClient(prices: Record<string, number>): ITradingClient {
   return {
+    resolveSymbol(symbol: string): string {
+      return symbol.toUpperCase();
+    },
     isKnownSymbol(symbol: string): boolean {
       return Object.prototype.hasOwnProperty.call(prices, symbol.toUpperCase());
     },
@@ -78,7 +81,8 @@ describe("advanced trading tools — alerts", () => {
     alerts = new AlertRulesService(db);
     watchlist = new WatchlistService(db);
     const hl = fakeTradingClient({ BTC: 70000, ETH: 3500, HYPE: 25, DOGE: 0.10 });
-    tools = createAdvancedTradingTools(hl, watchlist, alerts);
+    // Binance disabled in this fixture — alert flows are HL-only.
+    tools = createAdvancedTradingTools(hl, watchlist, alerts, undefined);
   });
 
   test("ghost_alert_set accepts symbols not in watchlist (alerts independent of watchlist)", async () => {
@@ -160,7 +164,7 @@ describe("advanced trading tools — alerts", () => {
     const tool = findTool(tools, "ghost_watchlist_remove");
     const result = await tool.execute("c1", { symbol: "BTC" });
     const text = extractText(result);
-    expect(text).toContain("Removed BTC from watchlist");
+    expect(text).toContain("Removed BTC (hyperliquid) from watchlist");
     expect(text).not.toContain("alert"); // no cascade copy
     // Alerts on BTC are untouched — independent surfaces.
     expect(alerts.list()).toHaveLength(2);

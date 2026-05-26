@@ -1,20 +1,48 @@
-import { useEffect, useMemo, useRef, type RefObject } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
-import { splitSymbol } from './symbol-utils';
+import { formatSymbolDisplay, sourceLabel, type PriceSourceId } from './symbol-utils';
 import emptyTokenSearchIllustration from '@/assets/empty-token-search.svg';
+import hyperliquidLogoSvg from '@/assets/hype.svg';
+import binanceLogoSvg from '@/assets/binance.svg';
+
+const SOURCE_LOGO: Record<PriceSourceId, string> = {
+  hyperliquid: hyperliquidLogoSvg,
+  binance: binanceLogoSvg,
+};
+
+function SourceLogo({ source, size = 16 }: { source: PriceSourceId; size?: number }) {
+  return (
+    <img
+      src={SOURCE_LOGO[source]}
+      alt=""
+      width={size}
+      height={size}
+      className="block shrink-0 select-none"
+      draggable={false}
+      aria-hidden="true"
+    />
+  );
+}
+
+export interface TokenEntry {
+  symbol: string;
+  source: PriceSourceId;
+}
 
 export interface WatchlistAddDrawerProps {
   open: boolean;
   onClose: () => void;
-  /** Full token universe (already pre-filtered by search). */
-  tokens: string[];
+  /** Full (symbol, source) universe — already pre-filtered + sorted by parent. */
+  tokens: TokenEntry[];
+  /** Keyed `${source}:${symbol}`. */
   prices: Record<string, number>;
+  /** Keyed `${source}:${symbol}`. */
   prevDayPrices: Record<string, number>;
-  /** Symbols already on the user's watchlist. */
+  /** Set of `${source}:${symbol}` already on the user's watchlist. */
   watchlistSet: Set<string>;
   searchQuery: string;
   onSearchChange: (q: string) => void;
-  onToggle: (symbol: string) => void;
+  onToggle: (symbol: string, source: PriceSourceId) => void;
 }
 
 export function WatchlistAddDrawer({
@@ -29,6 +57,10 @@ export function WatchlistAddDrawer({
   onToggle,
 }: WatchlistAddDrawerProps) {
   const inputRef = useRef<HTMLInputElement>(null);
+  // Source filter — single-selection tab: 'all' shows tokens from every
+  // source; otherwise tokens are filtered to the chosen source.
+  type SourceTab = 'all' | PriceSourceId;
+  const [sourceTab, setSourceTab] = useState<SourceTab>('all');
 
   useEffect(() => {
     if (!open) return;
@@ -56,11 +88,12 @@ export function WatchlistAddDrawer({
   const stableTokens = useMemo(() => {
     if (!open) return tokens;
     const seen = new Set<string>();
-    const out: string[] = [];
-    for (const sym of tokens) {
-      if (!seen.has(sym)) {
-        seen.add(sym);
-        out.push(sym);
+    const out: TokenEntry[] = [];
+    for (const t of tokens) {
+      const key = `${t.source}:${t.symbol}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        out.push(t);
       }
     }
     return out;
@@ -68,6 +101,11 @@ export function WatchlistAddDrawer({
     // toggles must NOT reorder the list mid-session.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, searchQuery]);
+
+  const visibleTokens = useMemo(
+    () => sourceTab === 'all' ? stableTokens : stableTokens.filter((t) => t.source === sourceTab),
+    [stableTokens, sourceTab],
+  );
 
   return createPortal(
     <>
@@ -100,11 +138,13 @@ export function WatchlistAddDrawer({
           value={searchQuery}
           onChange={onSearchChange}
           onEnter={() => {
-            if (stableTokens.length > 0) onToggle(stableTokens[0]);
+            const first = visibleTokens[0];
+            if (first) onToggle(first.symbol, first.source);
           }}
         />
+        <SourceTabRow activeTab={sourceTab} onChange={setSourceTab} />
         <TokenList
-          tokens={stableTokens}
+          tokens={visibleTokens}
           prices={prices}
           prevDayPrices={prevDayPrices}
           watchlistSet={watchlistSet}
@@ -199,11 +239,11 @@ function SearchBox({ inputRef, value, onChange, onEnter }: SearchBoxProps) {
 }
 
 interface TokenListProps {
-  tokens: string[];
+  tokens: TokenEntry[];
   prices: Record<string, number>;
   prevDayPrices: Record<string, number>;
   watchlistSet: Set<string>;
-  onToggle: (sym: string) => void;
+  onToggle: (symbol: string, source: PriceSourceId) => void;
   searchQuery: string;
 }
 
@@ -232,20 +272,20 @@ function TokenList({ tokens, prices, prevDayPrices, watchlistSet, onToggle, sear
   }
   return (
     <div className="flex-1 min-h-0 overflow-y-auto pb-2">
-      {tokens.map((sym) => {
-        const isFav = watchlistSet.has(sym);
-        const price = prices[sym];
-        const prev = prevDayPrices[sym];
-        const change =
-          price != null && prev != null && prev > 0 ? ((price - prev) / prev) * 100 : null;
+      {tokens.map(({ symbol, source }) => {
+        const key = `${source}:${symbol}`;
+        const isFav = watchlistSet.has(key);
+        const price = prices[key];
+        const prevDayPrice = prevDayPrices[key];
         return (
           <TokenRow
-            key={sym}
-            symbol={sym}
+            key={key}
+            symbol={symbol}
+            source={source}
             isFav={isFav}
             price={price}
-            change={change}
-            onToggle={() => onToggle(sym)}
+            prevDayPrice={prevDayPrice}
+            onToggle={() => onToggle(symbol, source)}
           />
         );
       })}
@@ -255,58 +295,186 @@ function TokenList({ tokens, prices, prevDayPrices, watchlistSet, onToggle, sear
 
 interface TokenRowProps {
   symbol: string;
+  source: PriceSourceId;
   isFav: boolean;
   price: number | undefined;
-  change: number | null;
+  prevDayPrice: number | undefined;
   onToggle: () => void;
 }
 
-function TokenRow({ symbol, isFav, price, change, onToggle }: TokenRowProps) {
+function TokenRow({ symbol, source, isFav, price, prevDayPrice, onToggle }: TokenRowProps) {
+  const { chip, notation } = formatSymbolDisplay(symbol, source);
+  const hasChange = price != null && prevDayPrice != null && prevDayPrice > 0;
+  const delta = hasChange ? price - prevDayPrice : null;
+  const pct = hasChange ? ((price - prevDayPrice) / prevDayPrice) * 100 : null;
+  const changeColor = pct != null
+    ? pct >= 0
+      ? 'var(--color-success-default)'
+      : 'var(--color-error-default)'
+    : undefined;
   return (
     <button
       type="button"
       onClick={onToggle}
       aria-pressed={isFav}
-      aria-label={isFav ? `Remove ${symbol} from watchlist` : `Add ${symbol} to watchlist`}
+      aria-label={isFav ? `Remove ${notation} from watchlist` : `Add ${notation} to watchlist`}
       className={
-        'group w-full flex h-[42px] items-center justify-between p-4 ' +
-        'bg-transparent border-none text-left cursor-pointer ' +
+        'group w-full flex items-center justify-between px-4 py-3 ' +
+        'bg-transparent text-left cursor-pointer ' +
+        'border-b border-dashed border-border-subtle ' +
         'transition-colors duration-fast ease-out ' +
         'hover:bg-white/[0.03] focus-visible:bg-white/[0.04]'
       }
     >
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-3 min-w-0">
         <StarIcon filled={isFav} />
-        <SymbolWithDex symbol={symbol} />
+        <div className="flex flex-col gap-0.5 items-start min-w-0">
+          <span className="text-body-md text-text-primary leading-[1.5]">{notation}</span>
+          <div className="flex items-center gap-1.5">
+            <span
+              className="inline-flex items-center justify-center h-[18px] px-1 rounded-[3px]"
+              aria-label={sourceLabel(source)}
+              title={sourceLabel(source)}
+            >
+              <SourceLogo source={source} />
+            </span>
+            <span
+              className="inline-flex items-center justify-center min-w-[33px] h-[18px] px-1 pt-0.5 pb-1 rounded-[3px] bg-[var(--color-brand-subtle)] text-brand-default text-number-sm leading-none"
+            >
+              Perp
+            </span>
+            {chip && (
+              <span
+                className="inline-flex items-center justify-center h-[18px] px-1 pt-0.5 pb-1 rounded-[3px] bg-[var(--color-brand-subtle)] text-brand-default text-number-sm leading-none"
+                aria-label={`HIP-3 dex ${chip}`}
+                title={`HIP-3 dex ${chip}`}
+              >
+                {chip}
+              </span>
+            )}
+          </div>
+        </div>
       </div>
-      <div className="flex items-center gap-1 [font-variant-numeric:tabular-nums]">
-        <span className="text-body-sm text-text-primary">
+      <div className="flex flex-col items-end justify-center [font-variant-numeric:tabular-nums]">
+        <span className="text-body-md text-text-primary leading-[1.5]">
           {price != null ? formatPrice(price) : '--'}
         </span>
-        <ChangeChip pct={change} />
+        {hasChange && delta != null && pct != null ? (
+          <div className="flex items-center gap-1.5 text-body-sm leading-[1.5]" style={{ color: changeColor }}>
+            <span>{formatSignedDelta(delta)}</span>
+            <span>{formatSignedPct(pct)}</span>
+          </div>
+        ) : (
+          <span className="text-body-sm text-text-muted">--</span>
+        )}
       </div>
     </button>
   );
 }
 
-function SymbolWithDex({ symbol }: { symbol: string }) {
-  const { dex, base } = splitSymbol(symbol);
+function formatSignedDelta(v: number): string {
+  const abs = Math.abs(v);
+  const dp = abs >= 100 ? 0 : abs >= 1 ? 2 : 4;
+  const body = abs.toLocaleString('en-US', { minimumFractionDigits: dp, maximumFractionDigits: dp });
+  return (v >= 0 ? '+' : '-') + body;
+}
+
+function formatSignedPct(pct: number): string {
+  return (pct >= 0 ? '+' : '') + pct.toFixed(2) + '%';
+}
+
+function SourceTabRow({
+  activeTab,
+  onChange,
+}: {
+  activeTab: 'all' | PriceSourceId;
+  onChange: (t: 'all' | PriceSourceId) => void;
+}) {
+  const tabs: ReadonlyArray<{ id: 'all' | PriceSourceId; label: string }> = [
+    { id: 'all', label: 'All' },
+    { id: 'hyperliquid', label: sourceLabel('hyperliquid') },
+    { id: 'binance', label: sourceLabel('binance') },
+  ];
+  // Sliding underline: single absolute-positioned indicator animated via
+  // transform + width to the active tab label's measured layout. We
+  // measure the inner label span (not the button) so asymmetric button
+  // padding (e.g. the first tab having only pr-4) doesn't make the
+  // underline overshoot the visible text. ResizeObserver re-measures
+  // after web-font load (which can change the text width post-mount).
+  const tablistRef = useRef<HTMLDivElement | null>(null);
+  const labelRefs = useRef<Record<string, HTMLSpanElement | null>>({});
+  const [indicator, setIndicator] = useState<{ left: number; width: number }>({ left: 0, width: 0 });
+  const [hasMeasured, setHasMeasured] = useState(false);
+  useLayoutEffect(() => {
+    const measure = () => {
+      const el = labelRefs.current[activeTab];
+      const container = tablistRef.current;
+      if (!el || !container) return;
+      // `left: 0` on an absolute child anchors at the containing block's
+      // padding-box outer edge, which when the container has no left
+      // border equals the border-box edge — NOT the content-box edge.
+      // So translateX is the label's offset from the container's
+      // border-left, with NO paddingLeft subtraction. ResizeObserver
+      // re-fires after font load so the measurement stays correct
+      // across async layout shifts.
+      const containerRect = container.getBoundingClientRect();
+      const rect = el.getBoundingClientRect();
+      setIndicator({
+        left: rect.left - containerRect.left,
+        width: rect.width,
+      });
+      setHasMeasured(true);
+    };
+    measure();
+    const el = labelRefs.current[activeTab];
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [activeTab]);
   return (
-    <span className="flex items-center gap-1.5">
-      <span className="text-body-md text-text-primary">{base}</span>
-      {dex && (
-        <span
-          className={
-            'inline-flex items-center justify-center h-[18px] px-2 rounded-[2px] ' +
-            'bg-[rgba(59,247,191,0.08)] text-brand-default text-caption leading-none'
-          }
-          aria-label={`HIP-3 dex ${dex}`}
-          title={`HIP-3 dex ${dex}`}
-        >
-          {dex.toUpperCase()}
-        </span>
-      )}
-    </span>
+    <div
+      ref={tablistRef}
+      role="tablist"
+      aria-label="Filter tokens by source"
+      className="relative flex items-center px-4 border-b border-border-subtle shrink-0"
+    >
+      {tabs.map((t, i) => {
+        const active = activeTab === t.id;
+        // First tab has no left padding so its label aligns with the
+        // search input's left edge above (the container's px-4 already
+        // matches the input wrapper).
+        const padCls = i === 0 ? 'pr-4' : 'px-4';
+        return (
+          <button
+            key={t.id}
+            type="button"
+            role="tab"
+            aria-selected={active}
+            onClick={() => onChange(t.id)}
+            className={
+              `h-9 ${padCls} inline-flex items-center justify-center cursor-pointer ` +
+              'bg-transparent border-0 ' +
+              'text-body-md-semibold leading-[1.5] transition-colors duration-fast ease-out ' +
+              (active ? 'text-brand-default' : 'text-white hover:text-text-secondary')
+            }
+          >
+            <span ref={(el) => { labelRefs.current[t.id] = el; }} className="inline-block">{t.label}</span>
+          </button>
+        );
+      })}
+      <span
+        aria-hidden="true"
+        className="absolute bottom-0 left-0 h-[2px] bg-brand-default transition-[transform,width] duration-base ease-out pointer-events-none"
+        style={{
+          transform: `translateX(${indicator.left}px)`,
+          width: indicator.width,
+          // Hide until first measurement lands so the indicator doesn't
+          // flash at translate=0 on mount before useLayoutEffect runs.
+          opacity: hasMeasured ? 1 : 0,
+        }}
+      />
+    </div>
   );
 }
 
@@ -321,22 +489,6 @@ function StarIcon({ filled }: { filled: boolean }) {
         strokeLinejoin="round"
       />
     </svg>
-  );
-}
-
-function ChangeChip({ pct }: { pct: number | null }) {
-  if (pct == null) return <span className="text-body-sm text-text-muted">--</span>;
-  const isUp = pct >= 0;
-  const color = isUp ? 'var(--color-success-default)' : 'var(--color-error-text)';
-  return (
-    <div className="flex items-center gap-0.5">
-      <svg width="8" height="6" viewBox="0 0 8 6" fill="none" aria-hidden="true" className={isUp ? '' : 'rotate-180'}>
-        <path d="M4 0L8 6H0L4 0Z" fill={color} />
-      </svg>
-      <span className="text-body-sm [font-variant-numeric:tabular-nums]" style={{ color }}>
-        {Math.abs(pct).toFixed(2)}%
-      </span>
-    </div>
   );
 }
 
@@ -355,7 +507,6 @@ function GhostHeaderIcon() {
 }
 
 function formatPrice(v: number): string {
-  if (v >= 10_000) return `$${(v / 1000).toFixed(1)}k`;
-  if (v >= 1) return `$${v.toFixed(2)}`;
-  return `$${v.toFixed(4)}`;
+  const dp = v >= 1 ? 2 : 4;
+  return '$' + v.toLocaleString('en-US', { minimumFractionDigits: dp, maximumFractionDigits: dp });
 }

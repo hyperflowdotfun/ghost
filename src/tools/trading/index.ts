@@ -10,7 +10,7 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { ITradingClient } from "../../services/interfaces/trading-client.js";
 import type { IntelService } from "../../services/intel.js";
-import type { WatchlistService } from "../../services/watchlist.js";
+import type { WatchlistService } from "../../services/watchlist/service.js";
 import type { AlertRulesService } from "../../services/alert-rules.js";
 import type { NotificationsService } from "../../services/notifications.js";
 import type { PriceCache } from "../../services/price-cache.js";
@@ -38,6 +38,7 @@ import { createTweetsTools } from "./tweets.js";
 import { createXFollowTools } from "./x-follows.js";
 import type { NewsService } from "../../services/news.js";
 import type { RssDiscoveryService } from "../../services/rss-discovery.js";
+import type { BinanceService } from "../../services/binance.js";
 import type { TweetService } from "../../services/tweets.js";
 import type { XFollowService } from "../../services/x-follows.js";
 import type { SessionManager } from "../../session/manager.js";
@@ -49,6 +50,9 @@ export interface TradingToolsDeps {
   /** Required for ghost_session_info (idle-gate). */
   sessionManager: SessionManager;
   watchlist: WatchlistService;
+  /** Binance universe — undefined when Binance feed disabled. Watchlist
+   *  add validation uses `.has()` for Binance pairs. */
+  binance: BinanceService | undefined;
   alertRules: AlertRulesService;
   notifications: NotificationsService;
   priceCache: PriceCache;
@@ -68,16 +72,22 @@ export interface TradingToolsDeps {
   rssDiscovery?: RssDiscoveryService;
   tweets?: TweetService;
   xFollows?: XFollowService;
-  saveWalletConfig?: (address: string, privateKey: string, testnet: boolean) => Promise<void>;
+  testnet: boolean;
+  saveWalletConfig?: (address: string, privateKey: string) => Promise<void>;
   disconnectWallet?: () => Promise<{ address: string } | null>;
-  /** Required for ghost_liquidation_thresholds_set — writes to config.json. */
   config: Config;
   configPath: string;
 }
 
 export function createAllTradingTools(deps: TradingToolsDeps): AgentTool[] {
   return [
-    ...createAccountTools(deps.hl, deps.walletStore, deps.saveWalletConfig, deps.disconnectWallet),
+    ...createAccountTools({
+      hl: deps.hl,
+      walletStore: deps.walletStore,
+      testnet: deps.testnet,
+      saveWalletConfig: deps.saveWalletConfig,
+      disconnectWallet: deps.disconnectWallet,
+    }),
     ...createOrderTools(deps.hl, deps.walletStore),
     ...createRiskTools(deps.hl, deps.walletStore),
     ...createMarketTools(deps.hl, deps.priceCache),
@@ -93,7 +103,7 @@ export function createAllTradingTools(deps: TradingToolsDeps): AgentTool[] {
     }),
     ...createHistoryTools(deps.hl),
     ...createRecentOrdersTools(deps.hl),
-    ...createAdvancedTradingTools(deps.hl, deps.watchlist, deps.alertRules, deps.priceCache),
+    ...createAdvancedTradingTools(deps.hl, deps.watchlist, deps.alertRules, deps.binance, deps.priceCache),
     ...createTechnicalTools(deps.taIndicators, deps.taLevels),
     ...(deps.news ? createNewsSourceTools(deps.news) : []),
     ...(deps.news ? createNewsSearchTools(deps.news) : []),

@@ -15,7 +15,7 @@ import { OAuthManager } from "../auth/oauth.js";
 import { SecretStore } from "../config/secrets.js";
 import { CredentialStore } from "../config/credentials.js";
 import { loadConfig, saveConfig } from "../config/loader.js";
-import { configSchema, paperSchema, type Config } from "../config/schema.js";
+import { configSchema, type Config } from "../config/schema.js";
 import {
   getGhostDir,
   getConfigPath,
@@ -149,7 +149,14 @@ export async function runHeadless(
       customConfig.provider = headless.provider;
       customConfig.model = modelTrimmed;
       customConfig.secrets.encrypt = true;
-      if (daemonOptions.paper) customConfig.paper = daemonOptions.paper;
+      if (daemonOptions.mode === "paper") {
+        customConfig.mode = "paper";
+        if (daemonOptions.paperBalance !== undefined) {
+          customConfig.paper = { ...customConfig.paper, initialBalance: daemonOptions.paperBalance };
+        }
+      } else if (daemonOptions.mode === "testnet") {
+        customConfig.mode = "testnet";
+      }
       saveConfig(customConfig, configPath);
 
       const tzForCustom = resolveHeadlessTz(daemonOptions.logger);
@@ -157,10 +164,12 @@ export async function runHeadless(
 
       console.log(`[ghost] Custom provider: ${headless.provider} (from models.json)`);
       console.log(`[ghost] Model:    ${modelTrimmed}`);
-      if (daemonOptions?.paper) {
+      if (daemonOptions?.mode === "paper") {
         console.log(
-          `[ghost] Mode:     Paper trading (${daemonOptions.paper.initialBalance ?? 10000} USDC)`,
+          `[ghost] Mode:     Paper trading (${daemonOptions.paperBalance ?? 10000} USDC)`,
         );
+      } else if (daemonOptions?.mode === "testnet") {
+        console.log(`[ghost] Mode:     Testnet — faucet: https://app.hyperliquid-testnet.xyz/drip`);
       }
       console.log(`[ghost] Config saved to ${configPath}`);
       console.log(
@@ -257,10 +266,13 @@ export async function runHeadless(
   config.provider = headless.provider;
   config.model = model;
   config.secrets.encrypt = true;
-  // Persist paper trading config so the daemon reads it from config.json
-  // (the service starts `ghost daemon` with no flags).
-  if (daemonOptions.paper) {
-    config.paper = daemonOptions.paper;
+  if (daemonOptions.mode === "paper") {
+    config.mode = "paper";
+    if (daemonOptions.paperBalance !== undefined) {
+      config.paper = { ...config.paper, initialBalance: daemonOptions.paperBalance };
+    }
+  } else if (daemonOptions.mode === "testnet") {
+    config.mode = "testnet";
   }
 
   // Store API key
@@ -277,8 +289,10 @@ export async function runHeadless(
   console.log(`[ghost] Provider: ${providerInfo.label} (${headless.provider})`);
   console.log(`[ghost] Model:    ${model}`);
   console.log(`[ghost] Timezone: ${tz}`);
-  if (daemonOptions?.paper) {
-    console.log(`[ghost] Mode:     Paper trading (${daemonOptions.paper.initialBalance ?? 10000} USDC)`);
+  if (daemonOptions?.mode === "paper") {
+    console.log(`[ghost] Mode:     Paper trading (${daemonOptions.paperBalance ?? 10000} USDC)`);
+  } else if (daemonOptions?.mode === "testnet") {
+    console.log(`[ghost] Mode:     Testnet — faucet: https://app.hyperliquid-testnet.xyz/drip`);
   }
   console.log(`[ghost] Config saved to ${configPath}`);
 
@@ -348,22 +362,19 @@ export async function runWizard(daemonOptions: WizardOptions): Promise<void> {
 
   intro("Welcome — I'm Ghost, your trading companion on Hyperliquid.\nLet's get you set up. A few quick questions, then I'll stay close.");
 
-  // Step 1/5: Trading mode — only asked for full onboard.
-  // Skipped when --paper CLI flag was already supplied.
-  if (mode === "full" && !daemonOptions.paper) {
-    const tradingMode = await select({
+  let tradingMode: "live" | "testnet" | "paper" = daemonOptions.mode ?? "live";
+  if (mode === "full" && !daemonOptions.mode) {
+    const choice = await select({
       message: "Step 1/5 — Select trading mode",
       options: [
         { value: "paper", label: "Paper trading (simulated, safe to explore)", hint: "10,000 USDC starting balance" },
+        { value: "testnet", label: "Testnet (Hyperliquid testnet, signed orders + fake funds)", hint: "Faucet: app.hyperliquid-testnet.xyz/drip" },
         { value: "live",  label: "Live trading (real funds on Hyperliquid)" },
       ],
       initialValue: "paper",
     });
-    if (isCancel(tradingMode)) { cancel("Setup cancelled."); process.exit(0); }
-    if (tradingMode === "paper") {
-      daemonOptions.paper = paperSchema.parse({ enabled: true });
-    }
-    // tradingMode === "live" → leave daemonOptions.paper undefined.
+    if (isCancel(choice)) { cancel("Setup cancelled."); process.exit(0); }
+    tradingMode = choice as "live" | "testnet" | "paper";
   }
 
   // Step 2/5: Provider
@@ -554,7 +565,8 @@ export async function runWizard(daemonOptions: WizardOptions): Promise<void> {
     const next = applyUpdateModeChanges(existing, {
       provider: resolvedProvider,
       model: modelId,
-      paper: daemonOptions.paper,
+      mode: daemonOptions.mode,
+      paperBalance: daemonOptions.paperBalance,
     });
     saveConfig(next, configPath);
     s3.stop("Configuration updated.");
@@ -588,9 +600,10 @@ export async function runWizard(daemonOptions: WizardOptions): Promise<void> {
   }
   config.model = modelId;
   config.secrets.encrypt = true;
-  if (daemonOptions.paper) {
-    config.paper = daemonOptions.paper;
+  if (tradingMode === "paper" && daemonOptions.paperBalance !== undefined) {
+    config.paper = { ...config.paper, initialBalance: daemonOptions.paperBalance };
   }
+  config.mode = tradingMode;
 
   saveConfig(config, configPath);
 

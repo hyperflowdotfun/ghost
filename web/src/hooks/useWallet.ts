@@ -6,9 +6,16 @@
  */
 
 import { useState, useCallback, useEffect } from "react";
-import { createWalletClient, custom, parseSignature } from "viem";
+import { createWalletClient, custom, parseSignature, defineChain, type Chain } from "viem";
 import { arbitrum } from "viem/chains";
 import { useWalletProviders, type WalletProvider } from "./useWalletProviders";
+
+const hyperliquidTestnetChain: Chain = defineChain({
+  id: 998,
+  name: "Hyperliquid Testnet",
+  nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
+  rpcUrls: { default: { http: ["https://rpc.hyperliquid-testnet.xyz/evm"] } },
+});
 
 interface WalletInfo {
   address: string;
@@ -112,8 +119,6 @@ export function useWallet() {
       const provider = wallet?.source ? getProviderByRdns(wallet.source) : null;
       if (!provider) throw new Error("Wallet extension not found. Reconnect the wallet.");
 
-      const client = createWalletClient({ chain: arbitrum, transport: custom(provider) });
-
       const genRes = await fetch("/api/wallet/generate-agent", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -121,12 +126,15 @@ export function useWallet() {
       });
       const genData = await genRes.json();
       if (!genRes.ok) throw new Error(genData.error || "Failed to generate API wallet");
-      const { agentAddress, nonce } = genData;
+      const { agentAddress, nonce, chainId, signatureChainId, hyperliquidChain, exchangeUrl } = genData;
+
+      const signChain: Chain = chainId === hyperliquidTestnetChain.id ? hyperliquidTestnetChain : arbitrum;
+      const client = createWalletClient({ chain: signChain, transport: custom(provider) });
 
       const action = {
         type: "approveAgent",
-        hyperliquidChain: "Mainnet",
-        signatureChainId: "0xa4b1",
+        hyperliquidChain,
+        signatureChainId,
         agentAddress,
         agentName: "ghost",
         nonce,
@@ -134,19 +142,18 @@ export function useWallet() {
 
       setSigningPhase("switching-chain");
       const currentChainId = await client.getChainId();
-      if (currentChainId !== arbitrum.id) {
+      if (currentChainId !== signChain.id) {
         try {
-          await client.switchChain({ id: arbitrum.id });
+          await client.switchChain({ id: signChain.id });
         } catch (switchErr: unknown) {
           if ((switchErr as { code?: number })?.code === 4902) {
-            await client.addChain({ chain: arbitrum });
+            await client.addChain({ chain: signChain });
           } else {
             throw switchErr;
           }
         }
       }
 
-      // Verify active account matches
       const accounts = await client.getAddresses();
       const account = accounts.find((a) => a.toLowerCase() === walletAddress.toLowerCase());
       if (!account) {
@@ -158,7 +165,7 @@ export function useWallet() {
       const domain = {
         name: "HyperliquidSignTransaction",
         version: "1",
-        chainId: 42161,
+        chainId,
         verifyingContract: "0x0000000000000000000000000000000000000000" as `0x${string}`,
       } as const;
 
@@ -172,7 +179,7 @@ export function useWallet() {
       } as const;
 
       const message = {
-        hyperliquidChain: "Mainnet",
+        hyperliquidChain,
         agentAddress: agentAddress as `0x${string}`,
         agentName: "ghost",
         nonce: BigInt(nonce),
@@ -187,14 +194,13 @@ export function useWallet() {
         message,
       });
 
-      // Restore original chain
-      if (currentChainId !== arbitrum.id) {
+      if (currentChainId !== signChain.id) {
         client.switchChain({ id: currentChainId }).catch(() => {});
       }
 
       setSigningPhase("submitting");
       const { r, s, v } = parseSignature(signature);
-      const hlRes = await fetch("https://api.hyperliquid.xyz/exchange", {
+      const hlRes = await fetch(exchangeUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

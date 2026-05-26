@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useMemo, createContext, useContext, t
 import { useGateway } from '@/hooks/useGateway';
 import { useChartPanel } from '@/components/chart/ChartPanelContext-internals';
 import { WatchlistAddDrawer } from './WatchlistAddDrawer';
-import { SymbolBadges } from './SymbolBadges';
+import { formatSymbolDisplay, sourceLabel, type MarketType, type PriceSourceId } from './symbol-utils';
 
 interface WatchlistEditCtx {
   isEditing: boolean;
@@ -95,22 +95,43 @@ function formatPct(v: number): string {
 
 function changeColor(v: number | null): string {
   if (v == null) return 'var(--color-text-secondary)';
-  return v >= 0 ? 'var(--color-success-default)' : 'var(--color-error-text)';
+  return v >= 0 ? 'var(--color-success-default)' : 'var(--color-error-default)';
+}
+
+function MarketTypeChip({ type }: { type: MarketType }) {
+  const isPerp = type === 'Perp';
+  return (
+    <span
+      className={
+        'inline-flex items-center justify-center min-w-[33px] h-[18px] px-1 pt-0.5 pb-1 rounded-[3px] ' +
+        'text-number-sm leading-none ' +
+        (isPerp
+          ? 'bg-[var(--color-brand-subtle)] text-brand-default'
+          : 'bg-[var(--color-border-default)] text-text-secondary')
+      }
+    >
+      {type}
+    </span>
+  );
 }
 
 interface TokenInfo {
   symbol: string;
+  source: PriceSourceId;
   isDelisted?: true;
 }
 
 interface TokenData {
   tokens: TokenInfo[];
+  /** Keyed `${source}:${symbol}` (e.g. "hyperliquid:BTC", "binance:BTCUSDT"). */
   prices: Record<string, number>;
+  /** Keyed `${source}:${symbol}`. */
   prevDayPrices: Record<string, number>;
 }
 
 interface WatchlistItem {
   symbol: string;
+  source: PriceSourceId;
   addedAt: string;
   notes?: string;
 }
@@ -164,20 +185,24 @@ export function WatchlistWidget() {
       if (evt.event === 'trading.watchlist.changed' || evt.event === 'chat.done') {
         loadWatchlist();
       }
-      if (evt.event === 'trading.price.update') {
-        const { symbol, price, prevDayPrice } = evt.payload as { symbol: string; price: number; prevDayPrice?: number };
+      if (evt.event === 'trading.source.tick') {
+        // Per-source tick — carries the source label so we can update HL +
+        // Binance rows independently. Trading-domain consumers continue to
+        // subscribe to `trading.price.update` (HL-canonical, primary-only).
+        const { source, symbol, price, prevDayPrice } = evt.payload as {
+          source: PriceSourceId; symbol: string; price: number; prevDayPrice?: number;
+        };
+        const key = `${source}:${symbol}`;
         setTokenData((prev) => {
-          const priceUnchanged = prev.prices[symbol] === price;
-          // Only update prevDayPrices when a fresh value arrives — preserve the
-          // last-known value on ticks that don't carry prevDay (e.g. Binance WS).
+          const priceUnchanged = prev.prices[key] === price;
           const prevDayUnchanged = prevDayPrice === undefined
-            || prev.prevDayPrices[symbol] === prevDayPrice;
+            || prev.prevDayPrices[key] === prevDayPrice;
           if (priceUnchanged && prevDayUnchanged) return prev;
           return {
             ...prev,
-            prices: priceUnchanged ? prev.prices : { ...prev.prices, [symbol]: price },
+            prices: priceUnchanged ? prev.prices : { ...prev.prices, [key]: price },
             prevDayPrices: prevDayPrice !== undefined
-              ? { ...prev.prevDayPrices, [symbol]: prevDayPrice }
+              ? { ...prev.prevDayPrices, [key]: prevDayPrice }
               : prev.prevDayPrices,
           };
         });
@@ -191,24 +216,47 @@ export function WatchlistWidget() {
     if (!isEditing) setSearchQuery('');
   }, [isEditing]);
 
-  const symbols = useMemo(() => watchlistItems.map((i) => i.symbol), [watchlistItems]);
-  const watchlistSet = useMemo(() => new Set(symbols), [symbols]);
   const { prices, prevDayPrices, tokens: allTokens } = tokenData;
   const hasPrices = Object.keys(prices).length > 0;
 
-  const filteredTokens = useMemo(() => {
-    const live = allTokens.filter((t) => !t.isDelisted).map((t) => t.symbol);
-    const list = searchQuery
-      ? live.filter((sym) => sym.toUpperCase().includes(searchQuery.toUpperCase()))
-      : live;
-    const fav = list.filter((sym) => watchlistSet.has(sym));
-    const rest = list.filter((sym) => !watchlistSet.has(sym));
-    return [...fav, ...rest];
-  }, [allTokens, searchQuery, watchlistSet]);
+  // watchlistSet stores `${source}:${symbol}` so we can distinguish HL BTC
+  // from Binance BTCUSDT (same row collision when keyed by symbol alone).
+  const watchlistSet = useMemo(
+    () => new Set(watchlistItems.map((i) => `${i.source}:${i.symbol}`)),
+    [watchlistItems],
+  );
 
-  const toggleToken = useCallback((sym: string) => {
-    const method = watchlistSet.has(sym) ? 'trading.watchlist.remove' : 'trading.watchlist.add';
-    request(method, { symbol: sym })
+  const tokenEntries = useMemo(
+    () => allTokens.filter((t) => !t.isDelisted).map((t) => ({ symbol: t.symbol, source: t.source })),
+    [allTokens],
+  );
+
+  const filteredTokens = useMemo(() => {
+    const list = searchQuery
+      ? tokenEntries.filter((t) => {
+          const q = searchQuery.toUpperCase();
+          const { notation } = formatSymbolDisplay(t.symbol, t.source);
+          return t.symbol.toUpperCase().includes(q) || notation.toUpperCase().includes(q);
+        })
+      : tokenEntries;
+    const sourceRank: Record<PriceSourceId, number> = { hyperliquid: 0, binance: 1 };
+    const fav = list.filter((t) => watchlistSet.has(`${t.source}:${t.symbol}`));
+    const rest = list.filter((t) => !watchlistSet.has(`${t.source}:${t.symbol}`));
+    const cmp = (a: { symbol: string; source: PriceSourceId }, b: { symbol: string; source: PriceSourceId }) => {
+      if (a.source !== b.source) return sourceRank[a.source] - sourceRank[b.source];
+      // HL native (no colon) first, then HIP-3, then alphabetical.
+      const aHip = a.symbol.includes(':') ? 1 : 0;
+      const bHip = b.symbol.includes(':') ? 1 : 0;
+      if (aHip !== bHip) return aHip - bHip;
+      return a.symbol.localeCompare(b.symbol);
+    };
+    return [...fav.sort(cmp), ...rest.sort(cmp)];
+  }, [tokenEntries, searchQuery, watchlistSet]);
+
+  const toggleToken = useCallback((symbol: string, source: PriceSourceId) => {
+    const isFav = watchlistSet.has(`${source}:${symbol}`);
+    const method = isFav ? 'trading.watchlist.remove' : 'trading.watchlist.add';
+    request(method, { symbol, source })
       .then(() => loadWatchlist())
       .catch(() => {});
   }, [watchlistSet, request, loadWatchlist]);
@@ -230,7 +278,7 @@ export function WatchlistWidget() {
   }
 
   // Loading state
-  if (symbols.length === 0 && !hasPrices && connected) {
+  if (watchlistItems.length === 0 && !hasPrices && connected) {
     return (
       <div className={SHELL_CLS}>
         <WatchlistInternalHeader />
@@ -241,7 +289,7 @@ export function WatchlistWidget() {
   }
 
   // Empty state
-  if (symbols.length === 0) {
+  if (watchlistItems.length === 0) {
     return (
       <div className={SHELL_CLS}>
         <WatchlistInternalHeader />
@@ -251,38 +299,58 @@ export function WatchlistWidget() {
     );
   }
 
+  // Used by the "binance disabled" hint (Task 16) — when no Binance tokens
+  // surface from the snapshot we can show a muted inline label on orphaned
+  // Binance rows instead of `--`.
+  const binanceAvailable = allTokens.some((t) => t.source === 'binance');
+
   return (
     <div className={SHELL_CLS}>
       <WatchlistInternalHeader />
       <div className="flex flex-col pb-2">
-        {symbols.map((sym) => {
-          const price = prices[sym];
-          const prevDay = prevDayPrices[sym];
+        {watchlistItems.map((item) => {
+          const key = `${item.source}:${item.symbol}`;
+          const price = prices[key];
+          const prevDay = prevDayPrices[key];
           const hasChange = price != null && prevDay != null && prevDay > 0;
           const changeVal = hasChange ? price - prevDay : null;
           const changePct = hasChange ? ((price - prevDay) / prevDay) * 100 : null;
           const color = changeColor(changePct);
+          const { chip, notation } = formatSymbolDisplay(item.symbol, item.source);
+          const binanceDegraded = item.source === 'binance' && !binanceAvailable;
           return (
             <div
-              key={sym}
-              // TradingView-style row: symbol on the left, then a right-
-              // aligned trio — current price, 24h change value, 24h change %.
-              // All three numbers share one color driven by the sign of the
-              // 24h delta (green up, red down, muted when unknown).
-              className="group flex h-[42px] items-center justify-between gap-2 py-4 px-2.5 cursor-pointer transition-colors duration-fast ease-out hover:bg-white/[0.03]"
-              onClick={() => panel?.open({ symbol: sym })}
+              key={key}
+              className="group flex items-center justify-between gap-3 px-2.5 py-3 cursor-pointer transition-colors duration-fast ease-out hover:bg-white/[0.03] border-b border-dashed border-border-subtle"
+              onClick={() => panel?.open({ symbol: item.symbol, source: item.source })}
             >
-              <div className="flex items-center gap-1.5 text-body-md text-text-primary min-w-0">
-                <SymbolBadges symbol={sym} />
+              <div className="flex flex-col gap-0.5 min-w-0">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-body-md text-text-primary leading-[1.5]">{notation}</span>
+                  <MarketTypeChip type="Perp" />
+                  {chip && (
+                    <span
+                      className="inline-flex items-center justify-center h-[18px] px-1 pt-0.5 pb-1 rounded-[3px] bg-[var(--color-brand-subtle)] text-brand-default text-number-sm leading-none"
+                      aria-label={`HIP-3 dex ${chip}`}
+                      title={`HIP-3 dex ${chip}`}
+                    >
+                      {chip}
+                    </span>
+                  )}
+                </div>
+                <span className="text-number-sm text-text-secondary leading-[1.5]">{sourceLabel(item.source)}</span>
               </div>
-              <div className="flex items-center gap-3 text-body-sm [font-variant-numeric:tabular-nums]">
-                {/* Price stays white — TradingView convention. Only the
-                    change columns carry the green/red/muted color so the
-                    eye lands on direction signal, not the current price. */}
-                <span className="text-text-primary">{price != null ? formatPrice(price) : '--'}</span>
-                <span style={{ color }}>{changeVal != null ? formatChange(changeVal) : '--'}</span>
-                <span style={{ color }}>{changePct != null ? formatPct(changePct) : '--'}</span>
-              </div>
+              {binanceDegraded ? (
+                <span className="text-body-sm text-text-secondary">Binance disabled</span>
+              ) : (
+                <div className="flex flex-col items-end gap-0.5 [font-variant-numeric:tabular-nums]">
+                  <span className="text-body-md text-text-primary leading-[1.5]">{price != null ? formatPrice(price) : '--'}</span>
+                  <div className="flex items-center gap-1.5 text-number-sm leading-[1.5]">
+                    <span style={{ color }}>{changeVal != null ? formatChange(changeVal) : '--'}</span>
+                    <span style={{ color }}>{changePct != null ? formatPct(changePct) : '--'}</span>
+                  </div>
+                </div>
+              )}
             </div>
           );
         })}

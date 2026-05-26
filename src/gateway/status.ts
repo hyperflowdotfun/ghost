@@ -97,7 +97,7 @@ export function registerStatusMethods(
       channels: channelsMap,
       clients: deps.clientManager.count,
       showToolCalls: (deps.config.verbosity ?? 0) > 0,
-      paperMode: deps.config.paper.enabled,
+      paperMode: deps.config.mode === "paper",
     };
   });
 }

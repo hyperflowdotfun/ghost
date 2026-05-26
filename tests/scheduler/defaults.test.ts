@@ -259,3 +259,48 @@ describe("CronService seeding", () => {
     svc2.stop();
   });
 });
+
+// ---------------------------------------------------------------------------
+// BRIEFING_PROMPT / RECAP_PROMPT — language anchor + context anchor
+// ---------------------------------------------------------------------------
+
+describe("BRIEFING_PROMPT", () => {
+  test("instructs the agent to start by calling ghost_chat_history", () => {
+    expect(BRIEFING_PROMPT).toContain("ghost_chat_history");
+    // Strong wording — the model must call the tool, not "consider" calling it.
+    expect(BRIEFING_PROMPT.toLowerCase()).toMatch(/start by calling|call .* first/);
+  });
+
+  test("tells the agent to match the trader's language from chat history", () => {
+    expect(BRIEFING_PROMPT.toLowerCase()).toContain("language");
+  });
+
+  test("provides an empty-history fallback (reply in English)", () => {
+    expect(BRIEFING_PROMPT.toLowerCase()).toContain("english");
+  });
+
+  test("does not hardcode a message count — LLM decides", () => {
+    // Tool schema is 1-200. Prompt must NOT pin a specific count like
+    // "messages=10" because briefing vs recap need different windows.
+    expect(BRIEFING_PROMPT).not.toMatch(/messages\s*=\s*\d/);
+  });
+});
+
+describe("RECAP_PROMPT", () => {
+  test("instructs the agent to start by calling ghost_chat_history", () => {
+    expect(RECAP_PROMPT).toContain("ghost_chat_history");
+    expect(RECAP_PROMPT.toLowerCase()).toMatch(/start by calling|call .* first/);
+  });
+
+  test("tells the agent to match the trader's language from chat history", () => {
+    expect(RECAP_PROMPT.toLowerCase()).toContain("language");
+  });
+
+  test("provides an empty-history fallback (reply in English)", () => {
+    expect(RECAP_PROMPT.toLowerCase()).toContain("english");
+  });
+
+  test("does not hardcode a message count — LLM decides", () => {
+    expect(RECAP_PROMPT).not.toMatch(/messages\s*=\s*\d/);
+  });
+});

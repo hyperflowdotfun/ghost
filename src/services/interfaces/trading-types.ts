@@ -3,9 +3,11 @@
  */
 
 /**
- * Per-asset metadata exposed by the trading client and forwarded over the wire
- * by `trading.tokens.list`. `isDelisted` is sparse — present only on entries
- * HL has flagged removed.
+ * Per-asset metadata exposed by the trading client. `isDelisted` is sparse —
+ * present only on entries HL has flagged removed. Source-tagging for the
+ * multi-source watchlist payload lives at the snapshot layer (see
+ * `tokens-snapshot.ts SnapshotTokenInfo`), not here — trading-internal types
+ * stay HL-centric.
  */
 export interface TokenInfo {
   symbol: string;

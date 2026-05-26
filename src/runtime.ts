@@ -66,10 +66,11 @@ import { HyperliquidClient } from "./services/live/client.js";
 import type { ITradingClient } from "./services/interfaces/trading-client.js";
 import { PaperTradingClient } from "./services/paper/client.js";
 import { IntelService } from "./services/intel.js";
-import { WatchlistService } from "./services/watchlist.js";
+import { WatchlistService } from "./services/watchlist/service.js";
 import { AlertRulesService } from "./services/alert-rules.js";
 import { NotificationsService } from "./services/notifications.js";
-import { PriceCache } from "./services/price-cache.js";
+import { PriceCache, WatchlistPriceCache } from "./services/price-cache.js";
+import { BinanceService } from "./services/binance.js";
 import { NewsService } from "./services/news.js";
 import { RssDiscoveryService } from "./services/rss-discovery.js";
 import { TweetService } from "./services/tweets.js";
@@ -98,7 +99,7 @@ import { PaperWalletStore } from "./services/paper/wallet-store.js";
 import { join } from "node:path";
 import { existsSync, mkdirSync, copyFileSync, readdirSync } from "node:fs";
 import type { Database } from "bun:sqlite";
-import type { Config, PaperConfig } from "./config/schema.js";
+import type { Config, TradingMode } from "./config/schema.js";
 import type { ToolRegistry } from "./tools/registry.js";
 import { Runner } from "./agent/runner.js";
 import { ChartRenderer } from "./channels/telegram/chart-renderer.js";
@@ -151,6 +152,8 @@ export interface Runtime {
   alertRules: AlertRulesService;
   notifications: NotificationsService;
   priceCache: PriceCache;
+  watchlistPriceCache: WatchlistPriceCache;
+  binance: BinanceService;
   newsService: NewsService;
   rssDiscoveryService: RssDiscoveryService;
   tweetService: TweetService;
@@ -161,6 +164,7 @@ export interface Runtime {
   chartSeries: ChartSeriesService;
   taLevels: TaLevelsService;
   watchlistService: WatchlistService;
+  intelService: IntelService;
   approvalManager: ApprovalManager;
   confirmService: ConfirmService;
   eventBus: EventBus;
@@ -187,7 +191,8 @@ export interface Runtime {
 export interface RuntimeOptions {
   logger: Logger;
   configPath?: string;
-  paper?: PaperConfig;
+  mode?: TradingMode;
+  paperBalance?: number;
   /**
    * Confirm-service override. When set, this replaces the default Cli/Daemon
    * confirm implementation. Used by the eval harness to auto-approve trading
@@ -209,7 +214,14 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
   const migrated = await runConfigMigrations(rawConfig, CONFIG_MIGRATIONS);
   const config = migrated.config;
   if (migrated.dirty) saveConfig(config, configPath);
-  if (options.paper) config.paper = options.paper;
+  if (options.mode) {
+    config.mode = options.mode;
+    if (options.mode === "paper" && options.paperBalance !== undefined) {
+      config.paper = { ...config.paper, initialBalance: options.paperBalance };
+    }
+  }
+  const testnet = config.mode === "testnet";
+  const paperMode = config.mode === "paper";
   const logger = options.logger;
   const workspaceDir = getWorkspaceDir();
   seedWorkspaceTemplates(workspaceDir);
@@ -281,14 +293,13 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     logger: logger.child({ module: "tool" }),
   });
 
-  // Trading client — paper or live
-  const hyperLiquidClient = new HyperliquidClient(undefined, logger.child({ module: "hl" }));
-  const paperClient = config.paper.enabled
+  const hyperLiquidClient = new HyperliquidClient({ testnet }, logger.child({ module: "hl" }));
+  const paperClient = paperMode
     ? new PaperTradingClient(hyperLiquidClient, config.paper)
     : undefined;
   const tradingClient: ITradingClient = paperClient ?? hyperLiquidClient;
 
-  const walletStore: IWalletStore = config.paper.enabled
+  const walletStore: IWalletStore = paperMode
     ? new PaperWalletStore()
     : new WalletStore(db, credentials);
   const watchlistService = new WatchlistService(db);
@@ -321,6 +332,13 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
   const alertRules = new AlertRulesService(db, eventBus);
   const notifications = new NotificationsService(db);
   const priceCache = new PriceCache();
+  const watchlistPriceCache = new WatchlistPriceCache();
+
+  // Binance USDⓈ-M universe + native klines. Boot-only load — perp
+  // listings change order of days; restart Ghost to pick up new pairs. Errors
+  // swallowed inside load() so daemon boots even if Binance is unreachable.
+  const binance = new BinanceService({ logger: logger.child({ module: "binance" }) });
+  if (config.priceFeed.binanceEnabled) void binance.load();
 
   // Provider resolution — returns the LLM model (no module-level state).
   const model = resolveProvider(config, customModelRegistry);
@@ -412,14 +430,22 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
   // Bind the late ref so `makeBeforeToolCall` can find it on the next tool call.
   confirmServiceRef = confirmService;
 
+  // IntelService — shared between agent tools (market overview, trending) and
+  // the gateway (per-coin stats endpoint feeding the chart drawer header).
+  const intelService = new IntelService(
+    tradingClient,
+    config.priceFeed.binanceEnabled ? binance : undefined,
+  );
+
   // Trading tools — pure executors. Confirm interception happens in
   // `makeBeforeToolCall` so individual tools no longer take a confirm fn.
   for (const t of createAllTradingTools({
     hl: tradingClient,
     walletStore,
-    intel: new IntelService(),
+    intel: intelService,
     sessionManager,
     watchlist: watchlistService,
+    binance: config.priceFeed.binanceEnabled ? binance : undefined,
     alertRules,
     notifications,
     priceCache,
@@ -434,13 +460,14 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     rssDiscovery: rssDiscoveryService,
     tweets: tweetService,
     xFollows: xFollowService,
-    saveWalletConfig: config.paper.enabled
+    testnet,
+    saveWalletConfig: paperMode
       ? async () => {}
-      : async (address, privateKey, testnet) => {
+      : async (address, privateKey) => {
           await walletStore.save({ address, privateKey, testnet });
           eventBus.publish(WalletEvents.changed({ action: "connect", address }));
         },
-    disconnectWallet: config.paper.enabled
+    disconnectWallet: paperMode
       ? async () => {
           tradingClient.disconnect();
           return null;
@@ -480,7 +507,6 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
   // Runner re-applies the same filter per call (see src/agent/runner.ts).
   taskAgent.state.tools = tools.taskAgentTools();
 
-  // Wallet readiness — tracks startup connect; daemon awaits before app.listen
   const walletReady: Promise<void> = walletStore
     .load()
     .then((w) => { if (w) tradingClient.connect(w); })
@@ -568,6 +594,8 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     alertRules,
     notifications,
     priceCache,
+    watchlistPriceCache,
+    binance,
     newsService,
     rssDiscoveryService,
     tweetService,
@@ -578,6 +606,7 @@ export async function createRuntime(options: RuntimeOptions): Promise<Runtime> {
     chartSeries,
     taLevels,
     watchlistService,
+    intelService,
     approvalManager,
     confirmService,
     eventBus,

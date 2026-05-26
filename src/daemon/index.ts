@@ -30,7 +30,7 @@ import { ChannelEvents } from "../events/pairing-events.js";
 import { buildBuiltInJobs } from "../scheduler/defaults.js";
 import { EXIT_UNCAUGHT_EXCEPTION, EXIT_UNHANDLED_REJECTION } from "../helpers/exit-codes.js";
 
-import type { PaperConfig } from "../config/schema.js";
+import type { TradingMode } from "../config/schema.js";
 import type { Logger } from "pino";
 
 // ---------------------------------------------------------------------------
@@ -101,7 +101,8 @@ async function guardAgainstRunningService(logger: Logger): Promise<void> {
 export interface DaemonOptions {
   logger: Logger;
   configPath?: string;
-  paper?: PaperConfig;
+  mode?: TradingMode;
+  paperBalance?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -156,7 +157,8 @@ export async function startDaemon(options: DaemonOptions): Promise<void> {
   const runtime = await createRuntime({
     logger,
     configPath,
-    paper: options.paper,
+    mode: options.mode,
+    paperBalance: options.paperBalance,
   });
   const {
     config,
@@ -171,6 +173,8 @@ export async function startDaemon(options: DaemonOptions): Promise<void> {
     alertRules,
     notifications,
     priceCache,
+    watchlistPriceCache,
+    binance,
     newsService,
     rssDiscoveryService,
     tweetService,
@@ -248,16 +252,19 @@ export async function startDaemon(options: DaemonOptions): Promise<void> {
     alertRules,
     notifications,
     priceCache,
+    watchlistPriceCache,
+    binance,
     newsService,
     rssDiscoveryService,
     tweetService,
     xFollowService,
     preferenceStore,
     watchlistService,
+    intelService: runtime.intelService,
     approvalManager: runtime.approvalManager,
     eventBus: runtime.eventBus,
     skillService,
-    chartDataDeps: { chartSeries, taLevels },
+    chartDataDeps: { chartSeries, taLevels, binance },
     versionCheck: runtime.versionCheck,
     dispatcher,
     bus,
@@ -287,7 +294,6 @@ export async function startDaemon(options: DaemonOptions): Promise<void> {
     tools,
     channelManager: runtime.channelManager,
     pairingStore: runtime.pairingStore,
-    sessionManager: runtime.sessionManager,
     tradingClient: runtime.tradingClient,
     logger: logger.child({ module: "cron-delivery" }),
   }));

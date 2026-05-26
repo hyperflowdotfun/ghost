@@ -11,18 +11,26 @@ import type { CronSchedule } from "./types.js";
 /** The long-form prompt that drives the morning briefing agent turn.
  *  Exported so intel-briefing tool and delivery handler stay in sync. */
 export const BRIEFING_PROMPT =
-  "Run the morning briefing. Call tools to fetch the latest data: open " +
+  "Start by calling ghost_chat_history to ground your reply in the trader's " +
+  "recent conversation. Pick the message count based on what you need — " +
+  "enough to detect the trader's chat language and reference relevant topics " +
+  "they discussed. If the tool returns no messages, reply in English. " +
+  "Then run the morning briefing: call tools to fetch the latest data — open " +
   "positions, recent fills / trade history, watchlist, news, and market " +
   "signals (funding, whale activity, fear & greed). Summarize in under 15 " +
-  "sentences, in the language the user has been chatting in.";
+  "sentences in the trader's language.";
 
 /** The long-form prompt that drives the end-of-day recap agent turn.
  *  Exported alongside BRIEFING_PROMPT so consumers (e.g. tools, tests) stay in sync. */
 export const RECAP_PROMPT =
-  "Run the end-of-day recap. Call tools to fetch today's trade history and " +
-  "current open positions. Summarize today's PnL, position changes (opened, " +
-  "closed, scaled), and one notable market note. Brief one-liner if I had no " +
-  "activity. Reply in the language the user has been chatting in.";
+  "Start by calling ghost_chat_history to ground your reply in the trader's " +
+  "recent conversation. Pick the message count based on what you need — " +
+  "enough to detect the trader's chat language and reference relevant topics " +
+  "they discussed. If the tool returns no messages, reply in English. " +
+  "Then run the end-of-day recap: call tools to fetch today's trade history " +
+  "and current open positions. Summarize today's PnL, position changes " +
+  "(opened, closed, scaled), and one notable market note. Brief one-liner if " +
+  "I had no activity. Reply in the trader's language.";
 
 export interface DefaultJobSpec {
   /** Unique name — used as idempotency key; must match the job's `name` field. */

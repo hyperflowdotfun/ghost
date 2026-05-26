@@ -35,8 +35,13 @@ describe("event factories", () => {
   });
 
   test("TradingEvents.watchlistChanged shape", () => {
-    const e = TradingEvents.watchlistChanged({ action: "add", symbol: "ETH" });
-    expect(e).toEqual({ type: "trading.watchlist.changed", payload: { action: "add", symbol: "ETH" } });
+    const e = TradingEvents.watchlistChanged({ action: "add", symbol: "ETH", source: "hyperliquid" });
+    expect(e).toEqual({ type: "trading.watchlist.changed", payload: { action: "add", symbol: "ETH", source: "hyperliquid" } });
+  });
+
+  test("TradingEvents.sourceTick shape", () => {
+    const e = TradingEvents.sourceTick({ source: "binance", symbol: "BTCUSDT", price: 60_010 });
+    expect(e).toEqual({ type: "trading.source.tick", payload: { source: "binance", symbol: "BTCUSDT", price: 60_010 } });
   });
 
   test("ToolEvents.approvalRequested shape", () => {
