@@ -13,7 +13,6 @@ import type { AgentEvent } from "@earendil-works/pi-agent-core";
 import { createRuntime, getApiKey as makeGetApiKey } from "../runtime.js";
 import type { Runtime } from "../runtime.js";
 import { getGhostDir, getConfigPath, getCredentialsPath, getSecretKeyPath, getModelsConfigPath, getEvalConfigPath } from "../config/paths.js";
-import { paperSchema } from "../config/schema.js";
 import { createRootLogger } from "../logger.js";
 import { parseEvalArgs, type EvalConfig } from "./config.js";
 import { generatePersonas, type Persona } from "./persona.js";
@@ -497,7 +496,8 @@ async function buildEvalStack(
     throw new Error("buildEvalStack called without GHOST_HOME — caller must set it to the isolated tmp dir before constructing the stack.");
   }
   const runtime = await createRuntime({
-    paper: paperSchema.parse({ enabled: true, initialBalance: paperBalance }),
+    mode: "paper",
+    paperBalance,
     logger: await createRootLogger(0),
     confirmServiceOverride: {
       async confirm() { return { decision: "approved" as const }; },

@@ -54,7 +54,13 @@ describe("ghost_disconnect_wallet", () => {
   test("disconnects successfully and returns confirmation", async () => {
     const address = "0xabcdef1234567890abcdef1234567890abcdef12";
     const disconnectWallet = async () => ({ address });
-    const tools = createAccountTools(createMockHL(address), createMockWalletStore(), undefined, disconnectWallet);
+    const tools = createAccountTools({
+      hl: createMockHL(address),
+      walletStore: createMockWalletStore(),
+      testnet: false,
+
+      disconnectWallet,
+    });
     const tool = findTool(tools, "ghost_disconnect_wallet");
 
     const result = await tool.execute("call-1", {});
@@ -67,7 +73,13 @@ describe("ghost_disconnect_wallet", () => {
 
   test("returns error when no wallet connected", async () => {
     const disconnectWallet = async () => ({ address: "" });
-    const tools = createAccountTools(createMockHL(""), createMockWalletStore(), undefined, disconnectWallet);
+    const tools = createAccountTools({
+      hl: createMockHL(""),
+      walletStore: createMockWalletStore(),
+      testnet: false,
+
+      disconnectWallet,
+    });
     const tool = findTool(tools, "ghost_disconnect_wallet");
 
     const result = await tool.execute("call-1", {});
@@ -78,7 +90,13 @@ describe("ghost_disconnect_wallet", () => {
   test("returns error when callback returns null", async () => {
     const address = "0xabcdef1234567890abcdef1234567890abcdef12";
     const disconnectWallet = async () => null;
-    const tools = createAccountTools(createMockHL(address), createMockWalletStore(), undefined, disconnectWallet);
+    const tools = createAccountTools({
+      hl: createMockHL(address),
+      walletStore: createMockWalletStore(),
+      testnet: false,
+
+      disconnectWallet,
+    });
     const tool = findTool(tools, "ghost_disconnect_wallet");
 
     const result = await tool.execute("call-1", {});
@@ -87,7 +105,12 @@ describe("ghost_disconnect_wallet", () => {
   });
 
   test("returns error when disconnectWallet callback not provided", async () => {
-    const tools = createAccountTools(createMockHL(), createMockWalletStore(), undefined, undefined);
+    const tools = createAccountTools({
+      hl: createMockHL(),
+      walletStore: createMockWalletStore(),
+      testnet: false,
+
+    });
     const tool = findTool(tools, "ghost_disconnect_wallet");
 
     const result = await tool.execute("call-1", {});

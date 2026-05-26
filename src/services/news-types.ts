@@ -149,7 +149,7 @@ export const NEWS_SOURCE_PRESETS: NewsSourcePreset[] = [
   { sourceId: "theblock", name: "The Block", type: "rss", needsApiKey: false, defaultUrl: "https://www.theblock.co/rss.xml" },
   { sourceId: "decrypt", name: "Decrypt", type: "rss", needsApiKey: false, defaultUrl: "https://decrypt.co/feed" },
   { sourceId: "cointelegraph", name: "CoinTelegraph", type: "rss", needsApiKey: false, defaultUrl: "https://cointelegraph.com/rss" },
-  { sourceId: "coingecko", name: "CoinGecko", type: "api", needsApiKey: false },
+  // { sourceId: "coingecko", name: "CoinGecko", type: "api", needsApiKey: false },
 ];
 
 // ---------------------------------------------------------------------------

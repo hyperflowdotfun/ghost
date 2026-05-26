@@ -132,16 +132,29 @@ describe("ContextBuilder", () => {
     expect(ctx).not.toContain("Channel:");
   });
 
+  test("buildRuntimeContext does not leak UTC offset", () => {
+    const cb = new ContextBuilder({ workspaceDir, model: "test-model" }, emptyMemory, emptySkills);
+    const ctx = cb.buildRuntimeContext();
+    // A trailing (UTC±HH:MM) suffix on the Current Time line was read by
+    // the model as a region cue, biasing reply language. Runtime Context
+    // is metadata only; no language cues belong here.
+    expect(ctx).not.toMatch(/\(UTC[+-]\d{2}:\d{2}\)/);
+    expect(ctx).toContain("Current Time:");
+  });
+
   test("identity section includes model name", () => {
     const cb = new ContextBuilder({ workspaceDir, model: "claude-3-opus" }, emptyMemory, emptySkills);
     const prompt = cb.buildSystemPrompt();
     expect(prompt).toContain("claude-3-opus");
   });
 
-  test("identity section includes workspace directory", () => {
-    const cb = new ContextBuilder({ workspaceDir, model: "test-model" }, emptyMemory, emptySkills);
+  test("identity section omits Host and OS — they have no value for the LLM and add noise", () => {
+    const cb = new ContextBuilder({ workspaceDir, model: "claude-test" }, emptyMemory, emptySkills);
     const prompt = cb.buildSystemPrompt();
-    expect(prompt).toContain(workspaceDir);
+    expect(prompt).not.toMatch(/^Host: /m);
+    expect(prompt).not.toContain("| OS: ");
+    // Model identifier still useful — it lets the LLM tailor reasoning to its own size.
+    expect(prompt).toContain("claude-test");
   });
 
   test("buildCliSystemPrompt inlines active skill bodies so CLI invokes always-on skills in -p mode", () => {

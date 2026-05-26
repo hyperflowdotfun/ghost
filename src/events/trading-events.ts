@@ -1,11 +1,24 @@
+import type { PriceSourceId } from "../services/price-feed/types.js";
+
 export interface PriceUpdateEvent {
   type: "trading.price.update";
   payload: { symbol: string; price: number; prevDayPrice?: number };
 }
 
+/**
+ * Source-tagged tick — emitted alongside `trading.price.update` for the
+ * watchlist UI which renders HL + Binance rows side-by-side. HL ticks fan
+ * out from CompositePriceFeed.onPrice; Binance ticks from
+ * WatchlistPriceFeed.onTick.
+ */
+export interface SourceTickEvent {
+  type: "trading.source.tick";
+  payload: { source: PriceSourceId; symbol: string; price: number; prevDayPrice?: number };
+}
+
 export interface WatchlistChangedEvent {
   type: "trading.watchlist.changed";
-  payload: { action: "add" | "remove"; symbol: string };
+  payload: { action: "add" | "remove"; symbol: string; source: PriceSourceId };
 }
 
 /**
@@ -46,6 +59,8 @@ export interface AlertRemovedEvent {
 export const TradingEvents = {
   priceUpdate: (p: PriceUpdateEvent["payload"]): PriceUpdateEvent =>
     ({ type: "trading.price.update", payload: p }),
+  sourceTick: (p: SourceTickEvent["payload"]): SourceTickEvent =>
+    ({ type: "trading.source.tick", payload: p }),
   watchlistChanged: (p: WatchlistChangedEvent["payload"]): WatchlistChangedEvent =>
     ({ type: "trading.watchlist.changed", payload: p }),
   tweetsInserted: (p: TweetsInsertedEvent["payload"]): TweetsInsertedEvent =>
@@ -58,6 +73,7 @@ export const TradingEvents = {
 
 export type TradingEvent =
   | PriceUpdateEvent
+  | SourceTickEvent
   | WatchlistChangedEvent
   | TweetsInsertedEvent
   | AlertSetEvent

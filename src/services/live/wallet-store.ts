@@ -42,7 +42,6 @@ export class WalletStore implements IWalletStore {
     };
   }
 
-  /** Load the default trading wallet. Returns null if none connected. */
   async load(): Promise<WalletData | null> {
     const row = this.stmts.getDefault.get() as { address: string; testnet: number } | undefined;
     if (!row) return null;
@@ -55,7 +54,6 @@ export class WalletStore implements IWalletStore {
     }
   }
 
-  /** Save a wallet with trading enabled. Only sets as default if no other default exists. */
   async save(data: WalletData): Promise<void> {
     const addr = data.address.toLowerCase();
     const source = data.source ?? "chat";
@@ -68,7 +66,6 @@ export class WalletStore implements IWalletStore {
     await this.credentials.set(`wallet/${addr}`, data.privateKey);
   }
 
-  /** Add a watch-only wallet (no private key needed). Returns true if new, false if already existed. */
   async addWatch(address: string, testnet: boolean, source: WalletSource): Promise<boolean> {
     const addr = address.toLowerCase();
     const existing = this.stmts.getByAddress.get(addr) as WalletRow | undefined;
@@ -77,7 +74,6 @@ export class WalletStore implements IWalletStore {
     return true;
   }
 
-  /** Enable trading on a watch-only wallet by storing API wallet credentials. */
   async enableTrading(address: string, apiWalletAddress: string, privateKey: string): Promise<void> {
     const addr = address.toLowerCase();
     const hasDefault = this.listWallets().some((w) => w.isDefault && w.status === "trading");
@@ -91,7 +87,6 @@ export class WalletStore implements IWalletStore {
     await this.credentials.set(`wallet/${addr}`, privateKey);
   }
 
-  /** List all wallets (without decrypted keys). */
   listWallets(): WalletInfo[] {
     const rows = this.stmts.list.all() as WalletRow[];
     return rows.map((r) => ({
@@ -105,7 +100,6 @@ export class WalletStore implements IWalletStore {
     }));
   }
 
-  /** Get a specific wallet by address. */
   getWallet(address: string): WalletInfo | null {
     const row = this.stmts.getByAddress.get(address.toLowerCase()) as WalletRow | undefined;
     if (!row) return null;
@@ -120,7 +114,6 @@ export class WalletStore implements IWalletStore {
     };
   }
 
-  /** Set a wallet as the default (must have trading status). */
   setDefault(address: string): void {
     const addr = address.toLowerCase();
     this.db.transaction(() => {
@@ -129,13 +122,11 @@ export class WalletStore implements IWalletStore {
     })();
   }
 
-  /** Remove a wallet and its credential. */
   async remove(address: string): Promise<boolean> {
     const addr = address.toLowerCase();
     await this.credentials.delete(`wallet/${addr}`);
     const result = this.stmts.remove.run(addr);
     if (result.changes > 0) {
-      // If removed wallet was default, promote next trading wallet
       const wallets = this.listWallets();
       const hasDefault = wallets.some((w) => w.isDefault);
       if (!hasDefault) {
@@ -146,7 +137,6 @@ export class WalletStore implements IWalletStore {
     return result.changes > 0;
   }
 
-  /** Remove all wallets from a specific source. Returns removed addresses. */
   async removeBySource(source: WalletSource): Promise<string[]> {
     const rows = this.stmts.listBySource.all(source) as Array<{ address: string }>;
     const removed: string[] = [];

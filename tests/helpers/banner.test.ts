@@ -15,6 +15,7 @@ import type { BannerDeps } from "../../src/helpers/banner.js";
 function makeRuntime(overrides: Partial<{
   provider: string;
   model: string;
+  mode: "live" | "testnet" | "paper";
   paperEnabled: boolean;
   paperBalance: number;
   paperFee: number;
@@ -28,11 +29,15 @@ function makeRuntime(overrides: Partial<{
     paperFee = 0.0002,
     schedulerEnabled = true,
   } = overrides;
+  // Derive mode from legacy paperEnabled when not explicitly set so older tests
+  // that branch on `paperEnabled` keep working without spelling out `mode`.
+  const mode = overrides.mode ?? (paperEnabled ? "paper" : "live");
 
   return {
     config: {
       provider,
       model,
+      mode,
       paper: { enabled: paperEnabled, initialBalance: paperBalance, takerFee: paperFee },
       cron: { enableScheduler: schedulerEnabled },
     },
@@ -127,6 +132,18 @@ describe("printDaemonStartupBanner", () => {
     expect(output).toContain("Ghost Paper Trading");
     expect(output).toContain("PAPER (simulated)");
     expect(output).toContain("50,000");
+  });
+
+  test("testnet mode: shows TESTNET heading + label", () => {
+    printDaemonStartupBanner({
+      runtime: makeRuntime({ mode: "testnet" }),
+      gateway: { host: "127.0.0.1", port: 15401 },
+      authDisplay: "API Key",
+      enabledChannels: [],
+    });
+    const output = lines.join("\n");
+    expect(output).toContain("Ghost Testnet Trading");
+    expect(output).toContain("TESTNET (real exchange, testnet USDC)");
   });
 
   test("live mode: shows 'Ghost daemon ready' heading", () => {

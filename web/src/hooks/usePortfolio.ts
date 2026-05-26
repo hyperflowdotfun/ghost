@@ -181,11 +181,12 @@ export function usePortfolioProvider(): PortfolioContextValue {
     }
   }, [connected, request]);
 
-  // Fetch paper mode status once on connect
   useEffect(() => {
     if (!connected) return;
     request<{ paperMode?: boolean }>('status')
-      .then((res) => { if (typeof res.paperMode === 'boolean') setPaperMode(res.paperMode); })
+      .then((res) => {
+        if (typeof res.paperMode === 'boolean') setPaperMode(res.paperMode);
+      })
       .catch(() => {});
   }, [connected, request]);
 

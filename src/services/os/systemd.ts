@@ -34,10 +34,33 @@ function unitPath(): string {
 // systemctl helpers
 // ---------------------------------------------------------------------------
 
-function systemctl(...args: string[]): { ok: boolean; stdout: string; stderr: string } {
+/**
+ * Default timeout for fast systemctl queries (is-active, daemon-reload,
+ * status). 15s is plenty — these calls normally return in milliseconds.
+ */
+const SYSTEMCTL_FAST_TIMEOUT_MS = 15_000;
+
+/**
+ * Timeout for systemctl commands that wait on the daemon lifecycle:
+ * `start`, `stop`, `restart`, `disable --now`. The unit file sets
+ * `TimeoutStopSec=30` and `TimeoutStartSec=30`, so a `restart` may
+ * legitimately take up to ~60s while the daemon drains. With the
+ * previous 15s spawnSync cap, restart calls during `ghost update`
+ * intermittently aborted the systemctl CLI mid-restart and reported
+ * a false "restart failed" even though systemd completed the
+ * restart in the background. 90s gives the unit's stop+start
+ * budgets full room plus a small margin.
+ */
+const SYSTEMCTL_SLOW_TIMEOUT_MS = 90_000;
+
+interface SystemctlOpts {
+  timeoutMs?: number;
+}
+
+function systemctl(args: readonly string[], opts: SystemctlOpts = {}): { ok: boolean; stdout: string; stderr: string } {
   const result = spawnSync("systemctl", ["--user", ...args], {
     encoding: "utf8",
-    timeout: 15_000,
+    timeout: opts.timeoutMs ?? SYSTEMCTL_FAST_TIMEOUT_MS,
   });
   return {
     ok: !result.error && (result.status === 0 || result.status === 3),
@@ -46,10 +69,10 @@ function systemctl(...args: string[]): { ok: boolean; stdout: string; stderr: st
   };
 }
 
-function systemctlStrict(...args: string[]): { ok: boolean; stdout: string; stderr: string } {
+function systemctlStrict(args: readonly string[], opts: SystemctlOpts = {}): { ok: boolean; stdout: string; stderr: string } {
   const result = spawnSync("systemctl", ["--user", ...args], {
     encoding: "utf8",
-    timeout: 15_000,
+    timeout: opts.timeoutMs ?? SYSTEMCTL_FAST_TIMEOUT_MS,
   });
   return {
     ok: !result.error && result.status === 0,
@@ -59,7 +82,7 @@ function systemctlStrict(...args: string[]): { ok: boolean; stdout: string; stde
 }
 
 function assertSystemdAvailable(): void {
-  const probe = systemctl("status");
+  const probe = systemctl(["status"]);
   // exit 0 = running, exit 3 = "no units active" — both mean systemd is available
   if (!probe.ok) {
     const detail = `${probe.stderr} ${probe.stdout}`.trim();
@@ -110,21 +133,21 @@ export class SystemdController implements ServiceController {
     writeFileSync(path, unit, "utf8");
 
     // Reload, enable, start
-    const reload = systemctlStrict("daemon-reload");
+    const reload = systemctlStrict(["daemon-reload"]);
     if (!reload.ok) {
       const msg = `daemon-reload failed: ${reload.stderr || reload.stdout}`;
       this.log.error({ stderr: reload.stderr, stdout: reload.stdout }, msg);
       throw new Error(msg);
     }
 
-    const enable = systemctlStrict("enable", SERVICE_NAME);
+    const enable = systemctlStrict(["enable", SERVICE_NAME]);
     if (!enable.ok) {
       const msg = `enable failed: ${enable.stderr || enable.stdout}`;
       this.log.error({ stderr: enable.stderr, stdout: enable.stdout }, msg);
       throw new Error(msg);
     }
 
-    const start = systemctlStrict("start", SERVICE_NAME);
+    const start = systemctlStrict(["start", SERVICE_NAME], { timeoutMs: SYSTEMCTL_SLOW_TIMEOUT_MS });
     if (!start.ok) {
       const msg = `start failed: ${start.stderr || start.stdout}`;
       this.log.error({ stderr: start.stderr, stdout: start.stdout }, msg);
@@ -136,7 +159,7 @@ export class SystemdController implements ServiceController {
 
   async stop(): Promise<void> {
     // Use lenient helper — tolerates exit code 3 (service already stopped).
-    const result = systemctl("stop", SERVICE_NAME);
+    const result = systemctl(["stop", SERVICE_NAME], { timeoutMs: SYSTEMCTL_SLOW_TIMEOUT_MS });
     if (!result.ok) {
       const msg = `stop failed: ${result.stderr || result.stdout}`;
       this.log.error({ stderr: result.stderr, stdout: result.stdout }, msg);
@@ -145,7 +168,7 @@ export class SystemdController implements ServiceController {
   }
 
   async restart(): Promise<void> {
-    const result = systemctlStrict("restart", SERVICE_NAME);
+    const result = systemctlStrict(["restart", SERVICE_NAME], { timeoutMs: SYSTEMCTL_SLOW_TIMEOUT_MS });
     if (!result.ok) {
       const msg = `restart failed: ${result.stderr || result.stdout}`;
       this.log.error({ stderr: result.stderr, stdout: result.stdout }, msg);
@@ -158,7 +181,7 @@ export class SystemdController implements ServiceController {
     const warnings: string[] = [];
 
     // Disable and stop in one command (tolerates unit not found)
-    const disable = systemctlStrict("disable", "--now", SERVICE_NAME);
+    const disable = systemctlStrict(["disable", "--now", SERVICE_NAME], { timeoutMs: SYSTEMCTL_SLOW_TIMEOUT_MS });
     if (!disable.ok) {
       warnings.push(`disable --now: ${disable.stderr || disable.stdout}`);
     }
@@ -175,7 +198,7 @@ export class SystemdController implements ServiceController {
     }
 
     // Reload after removal
-    systemctlStrict("daemon-reload");
+    systemctlStrict(["daemon-reload"]);
 
     // Optionally purge logs
     if (opts.purgeLogs) {

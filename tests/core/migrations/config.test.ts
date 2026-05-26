@@ -1,7 +1,7 @@
 import { describe, test, expect } from "bun:test";
 import { runConfigMigrations } from "../../../src/core/migrations/config.js";
 import { configSchema, type Config } from "../../../src/config/schema.js";
-import type { Migration } from "../../../src/core/migrations/registry.js";
+import { CONFIG_MIGRATIONS, type Migration } from "../../../src/core/migrations/registry.js";
 
 function makeConfig(overrides: Partial<Record<string, unknown>> = {}): Config {
   return configSchema.parse(overrides);
@@ -91,6 +91,37 @@ describe("runConfigMigrations", () => {
     await expect(runConfigMigrations(cfg, migrations)).rejects.toThrow(
       /Duplicate migration version: 2/,
     );
+  });
+
+  describe("v2: lift paper.enabled to mode", () => {
+    test("paper.enabled === true → mode = 'paper'", async () => {
+      const cfg = makeConfig({ schemaVersion: 1, paper: { enabled: true } });
+      const result = await runConfigMigrations(cfg, CONFIG_MIGRATIONS);
+      expect(result.dirty).toBe(true);
+      expect(result.config.mode).toBe("paper");
+      expect(result.config.schemaVersion).toBeGreaterThanOrEqual(2);
+    });
+
+    test("paper.enabled === false → mode = 'live'", async () => {
+      const cfg = makeConfig({ schemaVersion: 1, paper: { enabled: false } });
+      const result = await runConfigMigrations(cfg, CONFIG_MIGRATIONS);
+      expect(result.config.mode).toBe("live");
+    });
+
+    test("missing paper block → mode = 'live'", async () => {
+      const cfg = makeConfig({ schemaVersion: 1 });
+      const result = await runConfigMigrations(cfg, CONFIG_MIGRATIONS);
+      expect(result.config.mode).toBe("live");
+    });
+
+    test("idempotent — re-running on already-migrated config is a no-op", async () => {
+      const cfg = makeConfig({ schemaVersion: 1, paper: { enabled: true } });
+      const first = await runConfigMigrations(cfg, CONFIG_MIGRATIONS);
+      const second = await runConfigMigrations(first.config, CONFIG_MIGRATIONS);
+      expect(second.dirty).toBe(false);
+      expect(second.config.mode).toBe("paper");
+      expect(second.config.schemaVersion).toBe(first.config.schemaVersion);
+    });
   });
 
   test("awaits async migration bodies", async () => {

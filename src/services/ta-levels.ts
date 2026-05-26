@@ -154,9 +154,21 @@ export class TaLevelsService {
   /** Detect support/resistance levels for a symbol. Returns typed data. */
   async getLevels(symbol: string, interval: string, lookback: number, method?: string): Promise<LevelsResult> {
     const klines = await this.hl.getKlines(symbol, interval, lookback);
+    const resolved = this.hl.resolveSymbol(symbol);
+    return TaLevelsService.computeLevels(klines, resolved, interval, method);
+  }
+
+  /** Pure computation — no I/O. Reused by `/api/chart-data?source=binance`
+   *  so Binance klines get the same swing / fibonacci / pivot S/R logic as HL.
+   *  Throws when fewer than 10 candles are supplied. */
+  static computeLevels(
+    klines: Kline[],
+    symbol: string,
+    interval: string,
+    method?: string,
+  ): LevelsResult {
     if (klines.length < 10) throw new Error("Insufficient candle data.");
 
-    const resolved = this.hl.resolveSymbol(symbol);
     const highs = klines.map(k => k.high);
     const lows = klines.map(k => k.low);
     const closes = klines.map(k => k.close);
@@ -210,7 +222,7 @@ export class TaLevelsService {
     support.sort((a, b) => Math.abs(a.distPct) - Math.abs(b.distPct));
 
     return {
-      symbol: resolved, interval, price,
+      symbol, interval, price,
       resistance: resistance.slice(0, 8),
       support: support.slice(0, 8),
     };

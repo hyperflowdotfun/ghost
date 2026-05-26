@@ -4,9 +4,15 @@ import { Type } from "typebox";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { defineTool } from "./types.js";
 import type { ITradingClient } from "../../services/interfaces/trading-client.js";
-import type { WatchlistService } from "../../services/watchlist.js";
+import type { WatchlistService } from "../../services/watchlist/service.js";
 import type { AlertRulesService } from "../../services/alert-rules.js";
 import type { PriceCache } from "../../services/price-cache.js";
+import type { BinanceService } from "../../services/binance.js";
+import type { PriceSourceId } from "../../services/price-feed/types.js";
+import {
+  validateWatchlistSymbol,
+  canonicalWatchlistSymbol,
+} from "../../services/watchlist/sources.js";
 import { textResult, errorResult, getErrorMessage } from "../../helpers/result.js";
 import { formatUsd, formatPct } from "../../helpers/formatters.js";
 import { detectPriceTargetCrossings } from "../../observer/detect/price-target.js";
@@ -42,10 +48,17 @@ function suggestedTarget(condition: "above" | "below", current: number): number 
     : Math.round((current - delta) * 100) / 100;
 }
 
+const SOURCE_PARAM = Type.Optional(
+  Type.Union([Type.Literal("hyperliquid"), Type.Literal("binance")], {
+    description: "Price source. Defaults to 'hyperliquid'.",
+  }),
+);
+
 export function createAdvancedTradingTools(
   hl: ITradingClient,
   watchlist: WatchlistService,
   alerts: AlertRulesService,
+  binance: BinanceService | undefined,
   priceCache?: PriceCache,
 ): AgentTool[] {
   return [
@@ -53,17 +66,20 @@ export function createAdvancedTradingTools(
     defineTool({
       name: "ghost_watchlist_add",
       label: "Watchlist Add",
-      description: "Add a symbol to your watchlist with optional notes.",
+      description:
+        "Add a symbol to your watchlist with optional notes. Defaults to Hyperliquid; pass source='binance' to watch a Binance USDⓈ-M perp (use full pair like BTCUSDT).",
       parameters: Type.Object({
-        symbol: Type.String({ description: "Trading symbol (e.g. BTC, ETH)" }),
+        symbol: Type.String({ description: "Trading symbol (e.g. BTC for HL, BTCUSDT for Binance)" }),
+        source: SOURCE_PARAM,
         notes: Type.Optional(Type.String({ description: "Optional notes about this symbol" })),
       }),
       async execute(_toolCallId, params) {
         try {
-          const upper = params.symbol.toUpperCase();
-          if (!hl.isKnownSymbol(upper)) return errorResult(`Symbol ${upper} not found on Hyperliquid`);
-          const item = await watchlist.add(upper, params.notes);
-          return textResult(`Added ${item.symbol} to watchlist.${item.notes ? ` Notes: ${item.notes}` : ""}`);
+          const source = (params.source ?? "hyperliquid") as PriceSourceId;
+          const v = validateWatchlistSymbol(source, params.symbol, hl, binance);
+          if (!v.ok) return errorResult(v.error);
+          const item = await watchlist.add(v.canonical, source, params.notes);
+          return textResult(`Added ${item.symbol} (${source}) to watchlist.${item.notes ? ` Notes: ${item.notes}` : ""}`);
         } catch (e: unknown) { return errorResult(getErrorMessage(e)); }
       },
     }),
@@ -71,16 +87,18 @@ export function createAdvancedTradingTools(
       name: "ghost_watchlist_remove",
       label: "Watchlist Remove",
       description:
-        "Remove a symbol from your watchlist. Alerts on the same symbol are not affected — watchlist and alerts are independent surfaces.",
+        "Remove a symbol from your watchlist. Alerts on the same symbol are not affected — watchlist and alerts are independent surfaces. Defaults to Hyperliquid; pass source='binance' to remove a Binance entry.",
       parameters: Type.Object({
         symbol: Type.String({ description: "Trading symbol to remove" }),
+        source: SOURCE_PARAM,
       }),
       async execute(_toolCallId, params) {
         try {
-          const upper = params.symbol.toUpperCase();
-          const result = watchlist.remove(params.symbol);
-          if (!result.removed) return textResult(`${upper} is not in your watchlist.`);
-          return textResult(`Removed ${upper} from watchlist.`);
+          const source = (params.source ?? "hyperliquid") as PriceSourceId;
+          const target = canonicalWatchlistSymbol(source, params.symbol, hl);
+          const result = watchlist.remove(target, source);
+          if (!result.removed) return textResult(`${target} (${source}) is not in your watchlist.`);
+          return textResult(`Removed ${target} (${source}) from watchlist.`);
         } catch (e: unknown) { return errorResult(getErrorMessage(e)); }
       },
     }),

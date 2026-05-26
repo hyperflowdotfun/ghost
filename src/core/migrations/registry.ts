@@ -258,6 +258,39 @@ const fixCoindeskRssUrlMigration: Migration<Database> = {
   },
 };
 
+// v13: Add `source` column + composite PK to watchlist so the same base symbol
+// can coexist across exchanges (e.g. HL BTC + Binance BTCUSDT). Rebuild via
+// table-rename inside a transaction so a mid-migration failure leaves the
+// original table intact.
+const addWatchlistSourceMigration: Migration<Database> = {
+  version: 13,
+  label: "add_watchlist_source_composite_pk",
+  up: (db) => {
+    db.run("BEGIN");
+    try {
+      db.run("ALTER TABLE watchlist RENAME TO watchlist_old");
+      db.run(`
+        CREATE TABLE watchlist (
+          symbol    TEXT NOT NULL,
+          source    TEXT NOT NULL DEFAULT 'hyperliquid',
+          notes     TEXT,
+          added_at  INTEGER NOT NULL DEFAULT (unixepoch()),
+          PRIMARY KEY (symbol, source)
+        )
+      `);
+      db.run(`
+        INSERT INTO watchlist (symbol, source, notes, added_at)
+        SELECT symbol, 'hyperliquid', notes, added_at FROM watchlist_old
+      `);
+      db.run("DROP TABLE watchlist_old");
+      db.run("COMMIT");
+    } catch (err) {
+      db.run("ROLLBACK");
+      throw err;
+    }
+  },
+};
+
 export const DB_MIGRATIONS: ReadonlyArray<Migration<Database>> = [
   baselineDbMigration,
   proactiveCooldownsMigration,
@@ -271,6 +304,7 @@ export const DB_MIGRATIONS: ReadonlyArray<Migration<Database>> = [
   addCronJobsMigration,
   reshapeArticlesMigration,
   fixCoindeskRssUrlMigration,
+  addWatchlistSourceMigration,
 ];
 
 // ---------------------------------------------------------------------------
@@ -283,7 +317,19 @@ export const DB_MIGRATIONS: ReadonlyArray<Migration<Database>> = [
 // reshaping nested data that Zod cannot transparently coerce, or (c) a nested
 // block must be explicitly deleted before Zod sees the config.
 
-export const CONFIG_MIGRATIONS: ReadonlyArray<Migration<Config>> = [];
+const liftPaperEnabledToModeMigration: Migration<Config> = {
+  version: 2,
+  label: "lift_paper_enabled_to_mode",
+  up: (cfg) => {
+    if (cfg.paper?.enabled === true) {
+      cfg.mode = "paper";
+    }
+  },
+};
+
+export const CONFIG_MIGRATIONS: ReadonlyArray<Migration<Config>> = [
+  liftPaperEnabledToModeMigration,
+];
 
 export function assertUniqueVersions<T>(
   sorted: ReadonlyArray<Migration<T>>,

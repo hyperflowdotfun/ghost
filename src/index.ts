@@ -20,6 +20,7 @@ const { values, positionals } = parseArgs({
   options: {
     config: { type: "string", short: "c" },
     paper: { type: "boolean", short: "p" },
+    testnet: { type: "boolean", short: "t" },
     balance: { type: "string", short: "b" },
     provider: { type: "string" },
     model: { type: "string" },
@@ -81,6 +82,7 @@ try {
     case "onboard":
       await runOnboard({
         paper: Boolean(values.paper),
+        testnet: Boolean(values.testnet),
         balance: stringOpt(values.balance),
         provider: stringOpt(values.provider),
         model: stringOpt(values.model),
@@ -194,10 +196,17 @@ async function runStatus(opts: { config?: string; logger: Logger }) {
     logger: opts.logger,
   });
 
+  const networkLabel = config.mode === "testnet"
+    ? "TESTNET"
+    : config.mode === "paper"
+    ? "paper (simulated)"
+    : "mainnet";
+
   console.log(`Ghost v${currentVersion}`);
   if (hint) console.log(hint);
   console.log("============");
   console.log(`Provider:    ${config.provider}/${config.model}`);
+  console.log(`Network:     ${networkLabel}`);
   console.log(`Auth:        ${authDisplay}`);
   console.log(`Autonomy:    ${config.autonomy.level}`);
   console.log(
@@ -223,6 +232,12 @@ async function runDoctor(opts: { config?: string; logger: Logger }) {
     const runtime = await createRuntime({ configPath: opts.config, logger: opts.logger });
     console.log("✓ Config loaded");
     console.log("✓ Database initialized");
+    const network = runtime.config.mode === "testnet"
+      ? "testnet"
+      : runtime.config.mode === "paper"
+      ? "paper (simulated)"
+      : "mainnet";
+    console.log(`✓ Network: ${network}`);
     console.log(`✓ Model: ${runtime.config.provider}/${runtime.config.model}`);
     console.log(`✓ Memory: file-based (MEMORY.md + HISTORY.md)`);
     console.log(`✓ Tools registered: ${runtime.tools.names().length}`);
@@ -274,9 +289,14 @@ async function runDoctor(opts: { config?: string; logger: Logger }) {
 }
 
 async function runOnboard(opts: {
-  paper?: boolean; balance?: string; logger: Logger;
+  paper?: boolean; testnet?: boolean; balance?: string; logger: Logger;
   provider?: string; model?: string;
 }) {
+  if (opts.paper && opts.testnet) {
+    console.error("--paper and --testnet are mutually exclusive. Pick one.");
+    process.exit(1);
+  }
+
   const headless = opts.provider && opts.model
     ? {
         provider: opts.provider,
@@ -285,22 +305,26 @@ async function runOnboard(opts: {
       }
     : undefined;
 
-  if (!opts.paper) {
-    await runWizard({ logger: opts.logger, headless });
+  if (opts.paper) {
+    let paperBalance: number | undefined;
+    if (opts.balance) {
+      const balance = parseFloat(opts.balance);
+      if (isNaN(balance) || balance <= 0) {
+        console.error("Invalid balance. Must be a positive number.");
+        process.exit(1);
+      }
+      paperBalance = balance;
+    }
+    await runWizard({ mode: "paper", paperBalance, logger: opts.logger, headless });
     return;
   }
 
-  const { paperSchema } = await import("./config/schema.js");
-  const raw: Record<string, unknown> = { enabled: true };
-  if (opts.balance) {
-    const balance = parseFloat(opts.balance);
-    if (isNaN(balance) || balance <= 0) {
-      console.error("Invalid balance. Must be a positive number.");
-      process.exit(1);
-    }
-    raw.initialBalance = balance;
+  if (opts.testnet) {
+    await runWizard({ mode: "testnet", logger: opts.logger, headless });
+    return;
   }
-  await runWizard({ paper: paperSchema.parse(raw), logger: opts.logger, headless });
+
+  await runWizard({ logger: opts.logger, headless });
 }
 
 async function runProviders(_positionals: string[], values: { models?: string }): Promise<void> {
@@ -402,6 +426,7 @@ Usage:
   ghost onboard                   Interactive setup wizard
   ghost onboard --paper           Setup wizard + paper mode (10k USDC)
   ghost onboard --paper -b 50000  Setup wizard + paper mode with custom balance
+  ghost onboard --testnet         Setup wizard + Hyperliquid testnet mode
   ghost onboard --provider <id> --model <id>
                                   Non-interactive setup (use GHOST_API_KEY env for key)
   ghost daemon                    Start gateway + channels + scheduler

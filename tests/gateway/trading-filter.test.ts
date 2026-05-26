@@ -48,6 +48,8 @@ function makeRegistry(): { reg: MethodRegistry; preferenceStore: PreferenceStore
     newsService: {} as any,
     preferenceStore,
     watchlist: {} as any,
+    intel: {} as any,
+    binance: undefined,
     logger: noopLogger,
     tokensSnapshot: { build: () => ({ tokens: [], prices: {}, prevDayPrices: {}, maxLeverages: {} }) } as any,
     priceCache: { get: () => undefined, set: () => {} } as any,

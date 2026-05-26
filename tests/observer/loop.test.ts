@@ -9,7 +9,7 @@ import { runDbMigrations } from "../../src/core/migrations/db.js";
 import { DB_MIGRATIONS } from "../../src/core/migrations/registry.js";
 import { AlertRulesService } from "../../src/services/alert-rules.js";
 import { NewsService } from "../../src/services/news.js";
-import { WatchlistService } from "../../src/services/watchlist.js";
+import { WatchlistService } from "../../src/services/watchlist/service.js";
 import { NotificationsService } from "../../src/services/notifications.js";
 import { PriceCache } from "../../src/services/price-cache.js";
 import { ApprovalManager } from "../../src/gateway/approval.js";

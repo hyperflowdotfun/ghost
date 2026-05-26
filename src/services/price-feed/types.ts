@@ -7,12 +7,30 @@
  */
 
 /**
+ * Stable identifier for a price source. Used in event payloads, cache keys
+ * (`${source}:${symbol}`), watchlist rows, and gateway dispatch.
+ */
+export type PriceSourceId = "hyperliquid" | "binance";
+
+/**
  * Callback invoked by a PriceSource when a new tick arrives.
  * `prevDayPrice` is optional — sources that do not have it (e.g. Binance WS
  * mark-price stream) omit it; the HL source includes it from both REST ticks
  * and `allDexsAssetCtxs` frames (prevDayPx field).
  */
 export type PriceTickCallback = (symbol: string, price: number, prevDayPrice?: number) => void;
+
+/**
+ * Source-tagged tick callback used by WatchlistPriceFeed. Carries
+ * source-native symbol (e.g. "BTCUSDT" for binance, "BTC" for hyperliquid)
+ * tagged with the source id. No canonicalization is applied.
+ */
+export type WatchlistTickCallback = (
+  source: PriceSourceId,
+  symbol: string,
+  price: number,
+  prevDayPrice?: number,
+) => void;
 
 export interface PriceSource {
   /** Stable identifier — used in logs and primary-selection comparisons. */

@@ -327,11 +327,14 @@ function buildMainChart(
     });
   } else {
     const candleCount = data.candles.length;
-    const visibleBars = Math.min(50, candleCount);
-    chart.timeScale().setVisibleLogicalRange({
-      from: candleCount - visibleBars,
-      to: candleCount - 1,
-    });
+    // lightweight-charts asserts from <= to; with 0 candles that's 0 > -1.
+    if (candleCount > 0) {
+      const visibleBars = Math.min(50, candleCount);
+      chart.timeScale().setVisibleLogicalRange({
+        from: candleCount - visibleBars,
+        to: candleCount - 1,
+      });
+    }
   }
 
   // Y-axis price zoom
@@ -505,6 +508,7 @@ export function FullscreenOverlay({
   panelHeight = 351,
   interval,
   onIntervalChange,
+  hideHeader = false,
 }: {
   data: ChartDataResponse;
   extraLevels: number[];
@@ -521,6 +525,10 @@ export function FullscreenOverlay({
    *  `onIntervalChange`, the header renders a timeframe selector. */
   interval?: string;
   onIntervalChange?: (next: string) => void;
+  /** Panel mode only — suppress the inline header (symbol/price/timeframe/ESC).
+   *  Used by the chart drawer (wave/24) which renders its own header above
+   *  the chart and would otherwise see it duplicated. */
+  hideHeader?: boolean;
 }) {
   const mainRef = useRef<HTMLDivElement>(null);
   const subRefs = useRef<HTMLDivElement[]>([]);
@@ -581,8 +589,11 @@ export function FullscreenOverlay({
       : mode === 'headless'
         ? (mainEl.parentElement?.parentElement?.clientHeight ?? window.innerHeight)
         : window.innerHeight;
+    // 52px chrome reserved for the inline panel header; drop it when the
+    // caller hides the header (chart drawer renders its own above the body).
+    const headerChrome = mode === 'panel' && hideHeader ? 0 : 52;
     const mainHeight =
-      containerHeight - 52 - subPaneCount * (SUB_PANE_HEIGHT + 4);
+      containerHeight - headerChrome - subPaneCount * (SUB_PANE_HEIGHT + 4);
     const mainChart = buildMainChart(
       mainEl,
       data,
@@ -610,7 +621,7 @@ export function FullscreenOverlay({
       for (const sc of subCharts) sc.remove();
       mainChart.remove();
     };
-  }, [data, extraLevels, focusTime, resolvedFocusPrice, focus, subPanes, hidden, mode, panelHeight]);
+  }, [data, extraLevels, focusTime, resolvedFocusPrice, focus, subPanes, hidden, mode, panelHeight, hideHeader]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -675,7 +686,20 @@ export function FullscreenOverlay({
   if (mode === 'panel') {
     // Inline panel — Figma node 331:3350. Sits at the top of the chat column,
     // not portalled. Background opaque (surface-canvas) so chat content
-    // behind is fully hidden (no blur).
+    // behind is fully hidden (no blur). When the parent suppresses the
+    // header (chart drawer), only the chart body renders here.
+    if (hideHeader) {
+      return (
+        <div
+          className="relative flex flex-col bg-[var(--color-surface-base)]"
+          style={{ height: panelHeight }}
+        >
+          <div className="flex flex-1 flex-col gap-1 min-h-0">
+            {chartBody}
+          </div>
+        </div>
+      );
+    }
     return (
       <div
         className="relative flex flex-col bg-[var(--color-surface-base)] border-t border-b border-[var(--color-border-subtle)]"

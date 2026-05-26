@@ -215,7 +215,7 @@ export class ObserverLoop {
     const pending = this.deps.approvalManager.getPending(MAIN_SESSION_KEY);
     if (pending) {
       await this.refreshBaselineQuietly(prior, nowMs);
-      this.deps.logger.info("observer tick — gated (confirm card open)");
+      this.deps.logger.debug("observer tick — gated (confirm card open)");
       return;
     }
 
@@ -361,7 +361,7 @@ export class ObserverLoop {
         type: "observer.tick",
         payload: { eventCount: gatedEvents.length, decision: "skip", ts: nowMs },
       });
-      this.deps.logger.info(
+      this.deps.logger.debug(
         { ...scanCounts, events: gatedEvents.length, decision: "skip" },
         "observer tick — no structural change, judge skipped",
       );
@@ -423,7 +423,7 @@ export class ObserverLoop {
     // re-wake every tick and burn LLM cost.
     stampPnlFloor(nextSnapshot, gatedEvents, nowMs);
 
-    this.deps.logger.info(
+    this.deps.logger.debug(
       {
         ...scanCounts,
         events: gatedEvents.length,

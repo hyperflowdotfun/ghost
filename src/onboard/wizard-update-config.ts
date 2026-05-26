@@ -1,31 +1,26 @@
-import type { Config, PaperConfig } from "../config/schema.js";
+import type { Config, TradingMode } from "../config/schema.js";
 
-/**
- * Build the next Config for wizard "update provider/model only" mode.
- *
- * Pure — takes the currently-persisted config and the fields the update-mode
- * wizard collected, returns a new Config. Preserves every other top-level
- * field (channels, gateway.pairedTokens, security tweaks, etc.) so the save
- * does not silently reset them to defaults.
- *
- * `paper` is overlaid only when provided; caller passes it only when the
- * `--paper` CLI flag was present on this invocation.
- */
 export interface UpdateModeOverlay {
-  /** Resolved provider id — already set to `customProviderName` for custom endpoints. */
   provider: string;
   model: string;
-  paper?: PaperConfig;
+  mode?: TradingMode;
+  paperBalance?: number;
 }
 
 export function applyUpdateModeChanges(
   existing: Config,
   overlay: UpdateModeOverlay,
 ): Config {
-  return {
+  const next: Config = {
     ...existing,
     provider: overlay.provider,
     model: overlay.model,
-    ...(overlay.paper ? { paper: overlay.paper } : {}),
   };
+  if (overlay.mode) {
+    next.mode = overlay.mode;
+    if (overlay.mode === "paper" && overlay.paperBalance !== undefined) {
+      next.paper = { ...existing.paper, initialBalance: overlay.paperBalance };
+    }
+  }
+  return next;
 }

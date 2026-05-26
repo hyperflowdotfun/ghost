@@ -67,7 +67,6 @@ export default function Layout() {
                 clipped. Main fills the wrapper as a flex-1 child. */}
             <div className="relative flex flex-1 min-w-0">
               <main className="flex-1 min-w-0 flex flex-col overflow-hidden border-t border-l border-r border-[var(--color-border-subtle)]">
-                <ChartPanelSlot />
                 <div className="flex-1 min-h-0 overflow-hidden">
                   <Outlet />
                 </div>
@@ -79,22 +78,21 @@ export default function Layout() {
                 >
                   GHOST :/ {model ?? '…'}
                 </div>
-                {chartOpen && (
-                  <button
-                    type="button"
-                    onClick={() => panel?.close()}
-                    aria-label="Close trading view"
-                    className="btn-press inline-flex items-center gap-2 pl-2 pr-1.5 h-[18px] rounded-[4px] bg-[#2a2c31] text-text-primary text-label-sm leading-none font-sans cursor-pointer transition-colors duration-fast ease-out hover:bg-[#3a3c42]"
-                  >
-                    Trading view
-                    <svg width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden="true">
-                      <path d="M1.5 1.5L8.5 8.5M8.5 1.5L1.5 8.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
-                    </svg>
-                  </button>
-                )}
               </div>
             </div>
-            <Sidebar position="right" />
+            {/* Right Sidebar collapses to 0 when the chart drawer is open
+                so the chat column never gets covered. Width is animated to
+                mirror the drawer's expand. */}
+            <div
+              className="shrink-0 overflow-hidden transition-[width] duration-base ease-out motion-reduce:transition-none"
+              style={{ width: chartOpen ? 0 : 320 }}
+              aria-hidden={chartOpen}
+            >
+              <Sidebar position="right" />
+            </div>
+            {/* Inline chart drawer — push layout. The drawer's own ESC chip
+                and Esc keyboard shortcut are the close affordances. */}
+            <ChartPanelSlot />
           </div>
         </div>
       </FeedCountsProvider>

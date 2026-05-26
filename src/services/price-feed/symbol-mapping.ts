@@ -1,20 +1,13 @@
 /**
- * Binance → Hyperliquid symbol mapping layer.
+ * Binance → Hyperliquid symbol bridge.
  *
  * Hyperliquid's perp universe uses unit-normalized symbols: `kPEPE` represents
  * a perp whose underlying is 1000 PEPE, so the USD price of kPEPE equals
- * 1000 × USD price of PEPE on Binance. Without translation, a Binance tick
- * for `PEPEUSDT` arrives as base `PEPE` and is silently dropped downstream
- * because the watchlist / UI only recognize HL-canonical symbols (`kPEPE`).
+ * 1000 × USD price of PEPE on Binance.
  *
- * This module is the single source of truth for that translation. The
- * Binance source applies `mapBinanceSymbol()` BEFORE emitting ticks so the
- * composite's downstream pipeline (broadcastPrice → watchlist filter →
- * frontend) only ever sees HL-canonical symbols regardless of which source
- * produced the tick.
- *
- * Unmapped Binance symbols are dropped at the source level — they represent
- * markets Hyperliquid does not list, so forwarding them would be noise.
+ * `mapBinanceSymbol(sym)` returns the HL-canonical name and price multiplier
+ * for `sym`, or `null` when HL doesn't list an equivalent perp. Pure
+ * translation — callers drop the tick when this returns null.
  */
 
 export interface SymbolMapping {
@@ -233,15 +226,11 @@ export const BINANCE_TO_HL: Record<string, SymbolMapping> = {
 };
 
 /**
- * Look up the HL-canonical mapping for a Binance symbol.
- * Returns `null` when the symbol has no HL equivalent — the source uses this
- * to drop ticks silently rather than emitting symbols that downstream
- * consumers (watchlist, UI) don't recognize.
- *
- * Case-sensitive by design: Binance emits upper-case symbols in its mini-
- * ticker stream, so tolerating case would just mask upstream bugs.
+ * Translate a Binance symbol to HL-canonical name + price multiplier.
+ * Returns `null` when HL doesn't list an equivalent perp — callers drop
+ * the tick. Case-sensitive by design: Binance emits upper-case symbols
+ * in its streams, so tolerating case would mask upstream bugs.
  */
 export function mapBinanceSymbol(binanceSymbol: string): SymbolMapping | null {
-  if (!binanceSymbol) return null;
   return BINANCE_TO_HL[binanceSymbol] ?? null;
 }

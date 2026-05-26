@@ -1,14 +1,14 @@
 /**
  * Regression tests for the price-feed start/stop lifecycle.
  *
- * HyperliquidSource.start() performs a one-shot REST hydration via
- * getAllTickers and emits each ticker through the onTick callback.
- * These tests verify the hydration contract without spinning up the
- * full gateway.
+ * HyperliquidSource.subscribe() performs a one-shot REST hydration via
+ * getAllTickers and dispatches each ticker through every registered
+ * listener. These tests verify the hydration contract without spinning up
+ * the full gateway.
  *
  * Covers:
- *   - start() hydrates through onTick (populates whatever cache the caller wires up)
- *   - start() does not throw on getAllTickers failure (degraded start)
+ *   - subscribe() hydrates through the listener (populates whatever cache the caller wires up)
+ *   - subscribe() does not throw on getAllTickers failure (degraded start)
  *   - non-finite markPrice entries are skipped
  *   - zero prevDayPrice is treated as absent
  */
@@ -84,13 +84,19 @@ function mkSource(client: ITradingClient): HyperliquidSource {
   });
 }
 
-describe("price-feed lifecycle: HyperliquidSource start() REST hydration", () => {
-  it("start() hydrates through onTick — cache is populated by the time start() resolves", async () => {
+/** Wait one microtask tick so ensureStarted()'s hydration promise drains. */
+function flush(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 5));
+}
+
+describe("price-feed lifecycle: HyperliquidSource subscribe() REST hydration", () => {
+  it("subscribe() hydrates through listener — cache is populated by the time hydration drains", async () => {
     const cache = new PriceCache();
     const src = mkSource(mkClient(SAMPLE_TICKERS));
 
-    await src.start((sym, price, prev) => cache.set(sym, price, prev));
-    await src.stop();
+    const unsub = src.subscribe((sym, price, prev) => cache.set(sym, price, prev));
+    await flush();
+    unsub();
 
     const btc = cache.get("BTC", Infinity);
     expect(btc?.price).toBe(60_000);
@@ -103,10 +109,11 @@ describe("price-feed lifecycle: HyperliquidSource start() REST hydration", () =>
     expect(aave?.price).toBe(100);
   });
 
-  it("start() does NOT throw when getAllTickers rejects — feed starts degraded", async () => {
+  it("subscribe() does NOT throw when getAllTickers rejects — feed starts degraded", async () => {
     const src = mkSource(mkClient([], { shouldThrow: true }));
-    await expect(src.start(() => {})).resolves.toBeUndefined();
-    await src.stop();
+    const unsub = src.subscribe(() => {});
+    await flush();
+    unsub();
   });
 
   it("skips tickers with non-finite markPrice", async () => {
@@ -127,8 +134,9 @@ describe("price-feed lifecycle: HyperliquidSource start() REST hydration", () =>
     const cache = new PriceCache();
     const src = mkSource(mkClient(badTickers));
 
-    await src.start((sym, price, prev) => cache.set(sym, price, prev));
-    await src.stop();
+    const unsub = src.subscribe((sym, price, prev) => cache.set(sym, price, prev));
+    await flush();
+    unsub();
 
     expect(cache.get("GHOST", Infinity)).toBeUndefined();
     expect(cache.get("BTC", Infinity)?.price).toBe(60_000);
@@ -151,8 +159,9 @@ describe("price-feed lifecycle: HyperliquidSource start() REST hydration", () =>
     const cache = new PriceCache();
     const src = mkSource(mkClient(tickers));
 
-    await src.start((sym, price, prev) => cache.set(sym, price, prev));
-    await src.stop();
+    const unsub = src.subscribe((sym, price, prev) => cache.set(sym, price, prev));
+    await flush();
+    unsub();
 
     const entry = cache.get("NEW", Infinity);
     expect(entry?.price).toBe(50);

@@ -7,6 +7,8 @@
  * cache miss so callers fall back to REST `metaAndAssetCtxs.markPx`.
  */
 
+import type { PriceSourceId } from "./price-feed/types.js";
+
 export interface PriceCacheEntry {
   price: number;
   /** Wall-clock when the tick landed in the cache. */
@@ -47,5 +49,36 @@ export class PriceCache {
   /** Drop all cached entries — used by gateway lifecycle teardown. */
   clear(): void {
     this.prices.clear();
+  }
+}
+
+/**
+ * WatchlistPriceCache — per-(source, symbol) cache for view-only consumers
+ * (watchlist UI + tokens snapshot Binance rows). Keyed by composite
+ * `${source}:${symbol}` so the same base symbol can coexist across exchanges.
+ *
+ * The HL-canonical PriceCache above remains the single source of truth for
+ * trading logic; this cache only powers UI display of multi-source rows.
+ */
+export class WatchlistPriceCache {
+  private readonly entries = new Map<string, PriceCacheEntry>();
+
+  private key(source: PriceSourceId, symbol: string): string {
+    return `${source}:${symbol}`;
+  }
+
+  set(source: PriceSourceId, symbol: string, price: number, prevDayPrice?: number): void {
+    this.entries.set(this.key(source, symbol), { price, timestamp: Date.now(), prevDayPrice });
+  }
+
+  get(source: PriceSourceId, symbol: string, maxAgeMs = 30_000): PriceCacheEntry | undefined {
+    const entry = this.entries.get(this.key(source, symbol));
+    if (!entry) return undefined;
+    if (Date.now() - entry.timestamp > maxAgeMs) return undefined;
+    return entry;
+  }
+
+  clear(): void {
+    this.entries.clear();
   }
 }

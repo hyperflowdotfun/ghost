@@ -2,6 +2,11 @@
  * Intel service — consolidated CoinGecko + DefiLlama + Alternative.me adapters.
  */
 
+import type { ITradingClient } from "./interfaces/trading-client.js";
+import type { BinanceService } from "./binance.js";
+
+export type CoinStatsSource = "hyperliquid" | "binance";
+
 // ─── Types ───
 
 export interface FearGreedData {
@@ -52,9 +57,46 @@ export interface FullOverview {
   stablecoinSupply: number;
 }
 
+export interface CoinStats {
+  symbol: string;
+  marketCap?: number;
+  volume24h?: number;
+  fdv?: number;
+  priceChangePct24h?: number;
+  openInterest?: number;
+}
+
+// ─── Helpers ───
+
+/** Source-native symbol → CoinGecko search ticker. HL stores base tickers
+ *  directly ("BTC"); Binance USDⓈ-M perps suffix "USDT" — strip it so CG
+ *  resolves the same coin id for both sources. */
+function cgTickerFor(symbol: string, source: CoinStatsSource): string {
+  if (source === "binance" && symbol.endsWith("USDT") && symbol.length > 4) {
+    return symbol.slice(0, -4);
+  }
+  return symbol;
+}
+
 // ─── Service ───
 
 export class IntelService {
+  // Per-symbol coin-stats cache. CoinGecko free tier rate-limits aggressively
+  // (~30 req/min); 60 s TTL keeps the drawer snappy without hammering the API.
+  private coinStatsCache = new Map<string, { value: CoinStats; expiresAt: number }>();
+  private static COIN_STATS_TTL_MS = 60_000;
+
+  // Permanent ticker → CG id resolution. `null` = searched and no match
+  // (negative-cache, don't retry). Survives until process restart.
+  private cgIdCache = new Map<string, string | null>();
+  // De-dupes concurrent `/search` calls for the same ticker (e.g. drawer
+  // opened twice for the same symbol before the first resolved).
+  private cgIdInflight = new Map<string, Promise<string | null>>();
+
+  constructor(
+    private tradingClient?: ITradingClient,
+    private binance?: BinanceService,
+  ) {}
 
   // ─── Alternative.me: Fear & Greed ───
 
@@ -159,6 +201,146 @@ export class IntelService {
           supplyChangePct7d: prevWeek > 0 ? Math.round(((supply - prevWeek) / prevWeek) * 10000) / 100 : 0,
         };
       });
+  }
+
+  // ─── Per-coin stats (chart drawer header) ───
+
+  /** Fetch marketcap / 24h volume / FDV / open interest for a single symbol.
+   *  Marketcap + FDV + 24h price change come from CoinGecko (cross-venue
+   *  aggregates); **OI and 24h volume are venue-native** — sourced from the
+   *  HL trading client when `source === "hyperliquid"` and from Binance fapi
+   *  when `source === "binance"`. This matches what the user sees on the
+   *  source's own trading UI rather than a mixed-exchange aggregate.
+   *
+   *  `symbol` is source-native — HL "BTC" / Binance "BTCUSDT". For CG lookup
+   *  we normalize to a base ticker (strip trailing "USDT" for Binance) so
+   *  both sources resolve to the same coin id. Returns symbol with empty
+   *  fields on unknown tickers — the UI handles missing values. */
+  async getCoinStats(symbol: string, source: CoinStatsSource = "hyperliquid"): Promise<CoinStats> {
+    const upper = symbol.toUpperCase();
+    const cacheKey = `${source}:${upper}`;
+    const cached = this.coinStatsCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) return cached.value;
+
+    const cgTicker = cgTickerFor(upper, source);
+    const venue = source === "binance"
+      ? await this.fetchBinanceVenueStats(upper)
+      : await this.fetchHlVenueStats(upper);
+
+    const cgId = await this.resolveCgId(cgTicker);
+    if (!cgId) {
+      const stats: CoinStats = {
+        symbol: upper,
+        openInterest: venue.openInterest,
+        volume24h: venue.volume24h,
+      };
+      this.coinStatsCache.set(cacheKey, {
+        value: stats,
+        expiresAt: Date.now() + IntelService.COIN_STATS_TTL_MS,
+      });
+      return stats;
+    }
+
+    try {
+      const data = await this.cg("/coins/markets", {
+        ids: cgId, vs_currency: "usd", price_change_percentage: "24h",
+      }) as Array<Record<string, unknown>>;
+      const row = data[0];
+      const stats: CoinStats = {
+        symbol: upper,
+        marketCap: typeof row?.market_cap === "number" ? row.market_cap : undefined,
+        // Venue-native volume preferred; CG aggregate only used as a fallback
+        // when the venue endpoint failed.
+        volume24h: venue.volume24h
+          ?? (typeof row?.total_volume === "number" ? row.total_volume : undefined),
+        fdv: typeof row?.fully_diluted_valuation === "number" ? row.fully_diluted_valuation : undefined,
+        priceChangePct24h: typeof row?.price_change_percentage_24h === "number"
+          ? row.price_change_percentage_24h
+          : undefined,
+        openInterest: venue.openInterest,
+      };
+      this.coinStatsCache.set(cacheKey, {
+        value: stats,
+        expiresAt: Date.now() + IntelService.COIN_STATS_TTL_MS,
+      });
+      return stats;
+    } catch {
+      return { symbol: upper, openInterest: venue.openInterest, volume24h: venue.volume24h };
+    }
+  }
+
+  /** Resolve a ticker (e.g. "BTC", "TRUMP") to its CoinGecko slug id (e.g.
+   *  "bitcoin", "official-trump") via `/search?query=…`. Cached permanently per
+   *  process — including negative results so we don't re-search unknown tickers.
+   *  Tickers shared by multiple coins (e.g. "UNI") resolve to the highest-
+   *  market-cap match. CG keeps legacy slugs serving even after renames, so
+   *  exact-symbol match handles most cases; tickers that CG itself renamed
+   *  (e.g. MATIC → POL) may return null. */
+  private async resolveCgId(upper: string): Promise<string | null> {
+    if (this.cgIdCache.has(upper)) return this.cgIdCache.get(upper) ?? null;
+    const inflight = this.cgIdInflight.get(upper);
+    if (inflight) return inflight;
+
+    const promise = this.searchCgId(upper)
+      .then((id) => {
+        this.cgIdCache.set(upper, id);
+        return id;
+      })
+      .catch(() => null)
+      .finally(() => { this.cgIdInflight.delete(upper); });
+    this.cgIdInflight.set(upper, promise);
+    return promise;
+  }
+
+  private async searchCgId(upper: string): Promise<string | null> {
+    const data = await this.cg("/search", { query: upper }) as { coins?: Array<Record<string, unknown>> };
+    const matches = (data.coins ?? []).filter(
+      (c) => typeof c.symbol === "string" && (c.symbol as string).toUpperCase() === upper,
+    );
+    if (matches.length === 0) return null;
+    // CG returns market_cap_rank ascending = higher cap; nulls (no rank) sink.
+    matches.sort((a, b) => {
+      const ra = typeof a.market_cap_rank === "number" ? a.market_cap_rank : Number.POSITIVE_INFINITY;
+      const rb = typeof b.market_cap_rank === "number" ? b.market_cap_rank : Number.POSITIVE_INFINITY;
+      return ra - rb;
+    });
+    const best = matches[0];
+    return typeof best?.id === "string" ? (best.id as string) : null;
+  }
+
+  /** Pull OI (USD = tokens × markPrice) AND 24h notional volume from a single
+   *  HL ticker call. Both fields are independently `undefined` when the
+   *  trading client is missing or the symbol isn't in the HL perp universe. */
+  private async fetchHlVenueStats(
+    symbol: string,
+  ): Promise<{ openInterest?: number; volume24h?: number }> {
+    const client = this.tradingClient;
+    if (!client) return {};
+    try {
+      const resolved = client.resolveSymbol(symbol);
+      if (!client.isKnownSymbol(resolved)) return {};
+      const ticker = await client.getTicker(resolved);
+      const oi = ticker.openInterest * ticker.markPrice;
+      return {
+        openInterest: Number.isFinite(oi) && oi > 0 ? oi : undefined,
+        volume24h: Number.isFinite(ticker.volume24h) && ticker.volume24h > 0
+          ? ticker.volume24h
+          : undefined,
+      };
+    } catch {
+      return {};
+    }
+  }
+
+  /** Pull OI (USD) AND 24h quote volume (USDT ≈ USD) from Binance fapi.
+   *  Delegated to BinanceService.getVenueStats which parallelizes the two
+   *  fapi calls and caches the result. */
+  private async fetchBinanceVenueStats(
+    symbol: string,
+  ): Promise<{ openInterest?: number; volume24h?: number }> {
+    if (!this.binance) return {};
+    const v = await this.binance.getVenueStats(symbol);
+    return { openInterest: v.openInterestUsd, volume24h: v.volume24hUsd };
   }
 
   // ─── Composite overview ───

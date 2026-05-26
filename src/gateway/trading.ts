@@ -9,7 +9,14 @@ import type { TweetService } from "../services/tweets.js";
 import type { XFollowService } from "../services/x-follows.js";
 import type { PreferenceStore } from "../services/preferences.js";
 import type { Importance } from "../services/news-types.js";
-import type { WatchlistService } from "../services/watchlist.js";
+import type { WatchlistService } from "../services/watchlist/service.js";
+import type { IntelService } from "../services/intel.js";
+import type { BinanceService } from "../services/binance.js";
+import type { PriceSourceId } from "../services/price-feed/types.js";
+import {
+  validateWatchlistSymbol,
+  canonicalWatchlistSymbol,
+} from "../services/watchlist/sources.js";
 import type { Logger } from "pino";
 import type { TokensSnapshotService } from "../services/tokens-snapshot.js";
 import type { PriceCache } from "../services/price-cache.js";
@@ -31,6 +38,10 @@ interface TradingDeps {
   xFollowService?: XFollowService;
   preferenceStore: PreferenceStore;
   watchlist: WatchlistService;
+  intel: IntelService;
+  /** Binance universe lookup for watchlist add validation; undefined when
+   *  Binance is disabled. Only `.has()` is consumed here. */
+  binance: BinanceService | undefined;
   logger: Logger;
   /** In-memory snapshot service — serves trading.tokens.list with zero HL calls. */
   tokensSnapshot: TokensSnapshotService;
@@ -216,6 +227,22 @@ export function registerTradingMethods(
     }
   });
 
+  register("trading.intel.coinStats", async (_ctx, payload) => {
+    // Per-coin stats for the chart drawer header (marketcap / 24h vol / FDV).
+    // Returns the symbol with empty fields for unknown tickers — frontend
+    // renders "—" for missing values rather than erroring.
+    const params = typeof payload === "object" && payload !== null ? (payload as Record<string, unknown>) : {};
+    const symbol = typeof params.symbol === "string" ? params.symbol : undefined;
+    const source = params.source === "binance" ? "binance" : "hyperliquid";
+    if (!symbol) return { symbol: "", marketCap: undefined, volume24h: undefined, fdv: undefined };
+    try {
+      return await deps.intel.getCoinStats(symbol, source);
+    } catch (err) {
+      log.warn({ symbol, source, err }, "trading.intel.coinStats failed");
+      return { symbol, marketCap: undefined, volume24h: undefined, fdv: undefined };
+    }
+  });
+
   register("trading.watchlist.list", async () => {
     try {
       return { items: deps.watchlist.list() };
@@ -227,17 +254,12 @@ export function registerTradingMethods(
   register("trading.watchlist.add", async (_ctx, payload) => {
     const params = typeof payload === "object" && payload !== null ? (payload as Record<string, unknown>) : {};
     const symbol = typeof params.symbol === "string" ? params.symbol : undefined;
+    const source = (typeof params.source === "string" ? params.source : "hyperliquid") as PriceSourceId;
     if (!symbol) return { error: "symbol required" };
-    // Canonicalize via resolveSymbol so HIP-3 "xyz:AAPL" stores with lowercase dex prefix,
-    // matching the form getAllTickers() emits. toUpperCase() alone breaks HIP-3 dedup.
-    const resolved = deps.tradingClient.resolveSymbol(symbol);
-    // Validate against the in-memory universe so watchlist.add never hits HL /info.
-    if (!deps.tradingClient.isKnownSymbol(resolved)) {
-      return { error: `Symbol ${resolved} not found on Hyperliquid` };
-    }
+    const v = validateWatchlistSymbol(source, symbol, deps.tradingClient, deps.binance);
+    if (!v.ok) return { error: v.error };
     try {
-      const item = deps.watchlist.add(resolved);
-      return { item };
+      return { item: deps.watchlist.add(v.canonical, source) };
     } catch (err) {
       return { error: err instanceof Error ? err.message : String(err) };
     }
@@ -246,11 +268,11 @@ export function registerTradingMethods(
   register("trading.watchlist.remove", async (_ctx, payload) => {
     const params = typeof payload === "object" && payload !== null ? (payload as Record<string, unknown>) : {};
     const symbol = typeof params.symbol === "string" ? params.symbol : undefined;
+    const source = (typeof params.source === "string" ? params.source : "hyperliquid") as PriceSourceId;
     if (!symbol) return { removed: false };
     try {
-      // Canonicalize so "XYZ:AAPL" and "xyz:AAPL" both remove the stored entry.
-      const resolved = deps.tradingClient.resolveSymbol(symbol);
-      return deps.watchlist.remove(resolved);
+      const target = canonicalWatchlistSymbol(source, symbol, deps.tradingClient);
+      return deps.watchlist.remove(target, source);
     } catch {
       return { removed: false };
     }

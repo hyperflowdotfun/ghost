@@ -172,32 +172,9 @@ class ContextBuilderStub {
   }
 }
 
-/**
- * Minimal SessionManager stub — surfaces a pre-canned message array so the
- * delivery handler can build its language-reference block.
- *
- * `shape` toggles between the array-of-blocks form (pi-ai canonical) and the
- * plain-string form that `Orchestrator.runPrompt` actually persists for
- * inbound user messages. Both must produce the same language reference.
- */
-class SessionManagerStub {
-  constructor(
-    private readonly userTexts: string[] = [],
-    private readonly shape: "array" | "string" = "array",
-  ) {}
-
-  getOrCreate(_key: string): { messages: Array<{ role: string; content: unknown }> } {
-    void _key;
-    return {
-      messages: this.userTexts.map((t) => ({
-        role: "user",
-        content: this.shape === "string"
-          ? t
-          : [{ type: "text", text: t }],
-      })),
-    };
-  }
-}
+// SessionManagerStub removed — delivery no longer reads the
+// session for a language anchor. The cron task prompt now instructs the
+// LLM to call ghost_chat_history itself.
 
 // ---------------------------------------------------------------------------
 // getOutboundChannels — fanout resolver (replaces resolvePrimaryChannel)
@@ -310,7 +287,6 @@ describe("createCronDeliveryHandler — web delivery (no telegram pairing)", () 
       tools: new ToolRegistryStub({ cron: cronTool }) as never,
       channelManager: makeManager(false),
       pairingStore: makePairingStore(),
-      sessionManager: new SessionManagerStub() as never,
       tradingClient: { address: "0xtest" } as never,
       logger: makeLogger() as never,
     };
@@ -374,46 +350,24 @@ describe("createCronDeliveryHandler — web delivery (no telegram pairing)", () 
     expect(result).toBe("Morning briefing text here");
   });
 
-  test("empty session → English fallback directive (no recent-messages block)", async () => {
-    // Default deps use SessionManagerStub() with no user texts. Runner.call
-    // clears state.messages, so without an explicit directive the model
-    // would infer language from the UTC offset in runtime context — landing
-    // on whatever language the offset's region speaks. The fallback
-    // short-circuits that inference.
+  test("runner message contains REMINDER prefix + verbatim payload — no language-anchor scaffolding", async () => {
+    const job = makeJob("morning-briefing", "Start by calling ghost_chat_history… Then run the morning briefing.");
     const handler = createCronDeliveryHandler(deps);
-    await handler(makeJob());
+    await handler(job);
     const message = runner.calls[0].message;
-    expect(message).toContain("Respond in English");
     expect(message).not.toContain("Recent user messages");
-    // English fallback must precede the reminder/task content.
-    expect(message.indexOf("Respond in English")).toBeLessThan(message.indexOf("natural message"));
+    expect(message).not.toContain("Respond in English");
+    expect(message).toContain("natural message");  // REMINDER_NOTE_PREFIX wording
+    expect(message).toContain(job.payload.message);
   });
 
-  test("session with user messages → prepended language-reference block (verbatim pass-through)", async () => {
-    const first = "how is my APT position doing?";
-    const second = "open a SUI short for me";
-    deps.sessionManager = new SessionManagerStub([first, second]) as never;
-    const handler = createCronDeliveryHandler(deps);
-    await handler(makeJob());
-    const message = runner.calls[0].message;
-    expect(message).toContain("Recent user messages");
-    expect(message).toContain(first);
-    expect(message).toContain(second);
-    // The lang-ref block must appear before the REMINDER_NOTE_PREFIX content.
-    expect(message.indexOf("Recent user messages")).toBeLessThan(message.indexOf("natural message"));
-  });
-  // BUG-0151 — user messages persisted with `content: string` (the dominant
-  // shape from Orchestrator.runPrompt) must also surface in the language
-  // reference. The pre-fix filter dropped them silently and recap defaulted
-  // to English.
-  test("string-shape user content → language-reference block populated", async () => {
-    const vi = "vị thế ETH của tôi đang lỗ bao nhiêu?";
-    deps.sessionManager = new SessionManagerStub([vi], "string") as never;
-    const handler = createCronDeliveryHandler(deps);
-    await handler(makeJob());
-    const message = runner.calls[0].message;
-    expect(message).toContain("Recent user messages");
-    expect(message).toContain(vi);
+  test("delivery does not touch sessionManager — language anchor moved into prompt", async () => {
+    // CronDeliveryDeps no longer takes sessionManager. Building a handler
+    // without one must still work.
+    const minimalDeps = { ...deps };
+    delete (minimalDeps as { sessionManager?: unknown }).sessionManager;
+    const handler = createCronDeliveryHandler(minimalDeps as CronDeliveryDeps);
+    await expect(handler(makeJob())).resolves.toBeTruthy();
   });
 });
 
@@ -427,7 +381,6 @@ describe("createCronDeliveryHandler — empty/whitespace response", () => {
       tools: new ToolRegistryStub() as never,
       channelManager: makeManager(false),
       pairingStore: makePairingStore(),
-      sessionManager: new SessionManagerStub() as never,
       tradingClient: { address: "0xtest" } as never,
       logger: makeLogger() as never,
     };
@@ -466,7 +419,6 @@ describe("createCronDeliveryHandler — CronTool context wrapping", () => {
       tools: new ToolRegistryStub({ cron: cronTool }) as never,
       channelManager: makeManager(false),
       pairingStore: makePairingStore(),
-      sessionManager: new SessionManagerStub() as never,
       tradingClient: { address: "0xtest" } as never,
       logger: makeLogger() as never,
     };
@@ -488,7 +440,6 @@ describe("createCronDeliveryHandler — CronTool context wrapping", () => {
       tools: new ToolRegistryStub({ cron: cronTool }) as never,
       channelManager: makeManager(false),
       pairingStore: makePairingStore(),
-      sessionManager: new SessionManagerStub() as never,
       tradingClient: { address: "0xtest" } as never,
       logger: makeLogger() as never,
     };
@@ -506,7 +457,6 @@ describe("createCronDeliveryHandler — CronTool context wrapping", () => {
       tools: new ToolRegistryStub() as never,
       channelManager: makeManager(false),
       pairingStore: makePairingStore(),
-      sessionManager: new SessionManagerStub() as never,
       tradingClient: { address: "0xtest" } as never,
       logger: makeLogger() as never,
     };
@@ -531,7 +481,6 @@ describe("createCronDeliveryHandler — telegram delivery (paired allowlist)", (
       tools: new ToolRegistryStub() as never,
       channelManager: makeManager(true),
       pairingStore: makePairingStore(["111", "222"]),
-      sessionManager: new SessionManagerStub() as never,
       tradingClient: { address: "0xtest" } as never,
       logger: makeLogger() as never,
     });
@@ -566,7 +515,6 @@ describe("createCronDeliveryHandler — telegram delivery (paired allowlist)", (
       tools: new ToolRegistryStub() as never,
       channelManager: makeManager(true),
       pairingStore: makePairingStore(["111", "222"]),
-      sessionManager: new SessionManagerStub() as never,
       tradingClient: { address: "0xtest" } as never,
       logger: makeLogger() as never,
     });
@@ -586,7 +534,6 @@ describe("createCronDeliveryHandler — telegram delivery (paired allowlist)", (
       tools: new ToolRegistryStub() as never,
       channelManager: makeManager(true),
       pairingStore: makePairingStore(),
-      sessionManager: new SessionManagerStub() as never,
       tradingClient: { address: "0xtest" } as never,
       logger: makeLogger() as never,
     });
@@ -607,7 +554,6 @@ describe("createCronDeliveryHandler — telegram delivery (paired allowlist)", (
       tools: new ToolRegistryStub() as never,
       channelManager: makeManager(true),
       pairingStore: makePairingStore(["*"]),
-      sessionManager: new SessionManagerStub() as never,
       tradingClient: { address: "0xtest" } as never,
       logger: makeLogger() as never,
     });
@@ -632,7 +578,6 @@ describe("createCronDeliveryHandler — wallet gate", () => {
       tools: new ToolRegistryStub() as never,
       channelManager: makeManager(false),
       pairingStore: makePairingStore(),
-      sessionManager: new SessionManagerStub() as never,
       tradingClient: { address } as never,
       logger: makeLogger() as never,
     };

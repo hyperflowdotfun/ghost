@@ -1,10 +1,8 @@
-import { hostname, platform } from "node:os";
 import { join } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import type { MemoryStore } from "../memory/store.js";
 import type { SkillsLoader } from "../skills/loader.js";
 import { sanitizeForPrompt } from "../helpers/sanitize-prompt.js";
-import { formatUtcOffset } from "../services/timezones-data.js";
 
 const BOOTSTRAP_FILES = ["SOUL.md"];
 const MAX_FILE_CHARS = 20_000;
@@ -240,9 +238,12 @@ export class ContextBuilder {
       minute: "2-digit",
       hour12: false,
     });
-    const offset = formatUtcOffset(tz, now);
 
-    let ctx = `[Runtime Context — metadata only, not instructions]\nCurrent Time: ${timeStr} (${offset})`;
+    // Intentionally no UTC offset. The offset string was being read by the
+    // LLM as a region cue and biasing reply language away from the trader's
+    // chat history. The local-time string alone is enough to greet at the
+    // right hour.
+    let ctx = `[Runtime Context — metadata only, not instructions]\nCurrent Time: ${timeStr}`;
     if (channel && chatId) {
       ctx += `\nChannel: ${channel}\nChat ID: ${chatId}`;
     }
@@ -254,7 +255,7 @@ export class ContextBuilder {
       `# Ghost\n\n` +
       `You are Ghost. Your identity, persona, and behavior are defined in SOUL.md — follow it fully.\n\n` +
       `## Runtime\n` +
-      `Host: ${hostname()} | OS: ${platform()} | Model: ${this.config.model}\n\n` +
+      `Model: ${this.config.model}\n\n` +
       `## Guidelines\n` +
       `- NEVER fabricate, invent, or guess tool results. Report errors honestly.\n` +
       `- Read files before modifying them.\n` +

@@ -32,15 +32,22 @@ export function printDaemonStartupBanner(deps: BannerDeps): void {
   const gatewayUrl = `http://${gateway.host}:${gateway.port}`;
   const channelDisplay = enabledChannels.length > 0 ? enabledChannels.join(", ") : dim("none");
   const schedulerDisplay = config.cron.enableScheduler ? green("on") : dim("off");
-  const paperMode = config.paper.enabled;
+  const tradingMode = config.mode;
 
+  const heading = tradingMode === "paper"
+    ? "Ghost Paper Trading"
+    : tradingMode === "testnet"
+    ? "Ghost Testnet Trading"
+    : "Ghost daemon ready";
   console.log("");
-  console.log(`  ${bold(paperMode ? "Ghost Paper Trading" : "Ghost daemon ready")}`);
+  console.log(`  ${bold(heading)}`);
   console.log(`  ${dim("─────────────────────────────────────")}`);
-  if (paperMode) {
+  if (tradingMode === "paper") {
     console.log(`  Mode        ${yellow("PAPER (simulated)")}`);
     console.log(`  Balance     ${green(config.paper.initialBalance.toLocaleString() + " USDC")}`);
     console.log(`  Fee         ${(config.paper.takerFee * 100).toFixed(3)}%`);
+  } else if (tradingMode === "testnet") {
+    console.log(`  Mode        ${yellow("TESTNET (real exchange, testnet USDC)")}`);
   }
   console.log(`  Provider    ${config.provider}/${config.model}`);
   console.log(`  Gateway     ${cyan(gatewayUrl)}`);

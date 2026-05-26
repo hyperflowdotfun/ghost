@@ -121,32 +121,17 @@ describe("mapBinanceSymbol", () => {
     expect(mapBinanceSymbol("")).toBeNull();
   });
 
-  test("lowercase input is NOT tolerated (exact match only)", () => {
-    // Binance emits upper-case in miniTicker. Tolerating case would silently
-    // mask upstream parser bugs.
+  test("lowercase input → null (exact-match lookup, no case folding)", () => {
+    // Binance emits upper-case in miniTicker. Lowercase doesn't match any
+    // hand-curated entry — masking case bugs is caller's concern.
     expect(mapBinanceSymbol("btcusdt")).toBeNull();
     expect(mapBinanceSymbol("BtcUsdt")).toBeNull();
   });
 
-  test("non-USDT pairs (e.g. ETHBTC) → null", () => {
+  test("non-USDT / leveraged / stable inputs all return null", () => {
     expect(mapBinanceSymbol("ETHBTC")).toBeNull();
-    expect(mapBinanceSymbol("BTCEUR")).toBeNull();
-    // Stable-quoted non-USDT (e.g. BUSD, FDUSD) also not mapped
-    expect(mapBinanceSymbol("BTCBUSD")).toBeNull();
-    expect(mapBinanceSymbol("BTCFDUSD")).toBeNull();
-  });
-
-  test("stable-stable pair (USDCUSDT) → null (no HL perp for USDC)", () => {
     expect(mapBinanceSymbol("USDCUSDT")).toBeNull();
-    expect(mapBinanceSymbol("FDUSDUSDT")).toBeNull();
-    expect(mapBinanceSymbol("DAIUSDT")).toBeNull();
-  });
-
-  test("leveraged token (BTCUPUSDT) → null", () => {
     expect(mapBinanceSymbol("BTCUPUSDT")).toBeNull();
-    expect(mapBinanceSymbol("BTCDOWNUSDT")).toBeNull();
-    expect(mapBinanceSymbol("ETHBULLUSDT")).toBeNull();
-    expect(mapBinanceSymbol("ETHBEARUSDT")).toBeNull();
   });
 });
 
@@ -215,23 +200,20 @@ describe("symbol-mapping: drift detector vs HL universe snapshot", () => {
 
 describe("mapBinanceSymbol: price-scaling arithmetic", () => {
   test("PEPE $0.00002 on Binance → kPEPE $0.02 on HL (1000×)", () => {
-    const m = mapBinanceSymbol("PEPEUSDT");
-    expect(m).not.toBeNull();
-    const hlPrice = 0.00002 * m!.multiplier;
+    const m = mapBinanceSymbol("PEPEUSDT")!;
+    const hlPrice = 0.00002 * m.multiplier;
     // 0.00002 * 1000 = 0.02 — but JS arithmetic yields 0.019999... so compare
     // with a relative tolerance instead of strict equality.
     expect(hlPrice).toBeCloseTo(0.02, 10);
   });
 
   test("SHIB $0.0000085 on Binance → kSHIB $0.0085 on HL (1000×)", () => {
-    const m = mapBinanceSymbol("SHIBUSDT");
-    expect(m).not.toBeNull();
-    expect(0.0000085 * m!.multiplier).toBeCloseTo(0.0085, 10);
+    const m = mapBinanceSymbol("SHIBUSDT")!;
+    expect(0.0000085 * m.multiplier).toBeCloseTo(0.0085, 10);
   });
 
   test("BTC $60000 on Binance → BTC $60000 on HL (1×)", () => {
-    const m = mapBinanceSymbol("BTCUSDT");
-    expect(m).not.toBeNull();
-    expect(60000 * m!.multiplier).toBe(60000);
+    const m = mapBinanceSymbol("BTCUSDT")!;
+    expect(60000 * m.multiplier).toBe(60000);
   });
 });

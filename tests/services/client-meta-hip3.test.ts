@@ -294,11 +294,28 @@ describe("HyperliquidClient.resolveSymbol", () => {
   });
 
   it("is idempotent — calling twice produces the same string", () => {
-    const inputs = ["BTC", "xyz:AAPL", "XYZ:AAPL", "flx:GOLD", "btc-usdt", "xyz:aapl"];
+    const inputs = ["BTC", "xyz:AAPL", "XYZ:AAPL", "flx:GOLD", "btc-usdt", "xyz:aapl", "kPEPE", "KPEPE"];
     for (const input of inputs) {
       const once = client.resolveSymbol(input);
       expect(client.resolveSymbol(once)).toBe(once);
     }
+  });
+
+  it("preserves lowercase k for HL k-prefix tokens (kPEPE, kBONK, ...)", () => {
+    // HL canonical names use lowercase `k` prefix for 1000-unit normalized perps.
+    expect(client.resolveSymbol("kPEPE")).toBe("kPEPE");
+    expect(client.resolveSymbol("KPEPE")).toBe("kPEPE");
+    expect(client.resolveSymbol("kpepe")).toBe("kPEPE");
+    expect(client.resolveSymbol("kBONK")).toBe("kBONK");
+    expect(client.resolveSymbol("kSHIB")).toBe("kSHIB");
+    expect(client.resolveSymbol("kFLOKI")).toBe("kFLOKI");
+    expect(client.resolveSymbol("kNEIRO")).toBe("kNEIRO");
+    expect(client.resolveSymbol("kLUNC")).toBe("kLUNC");
+  });
+
+  it("does NOT mangle non-k-prefix tokens that happen to start with K (e.g. KAITO)", () => {
+    expect(client.resolveSymbol("KAITO")).toBe("KAITO");
+    expect(client.resolveSymbol("kaito")).toBe("KAITO");
   });
 });
 

@@ -1,7 +1,7 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { Database } from "bun:sqlite";
 import { NewsService } from "../../src/services/news.js";
-import { WatchlistService } from "../../src/services/watchlist.js";
+import { WatchlistService } from "../../src/services/watchlist/service.js";
 import { NOOP_LOGGER } from "../../src/logger.js";
 import { initDatabase } from "../../src/core/database.js";
 import { DB_MIGRATIONS } from "../../src/core/migrations/registry.js";

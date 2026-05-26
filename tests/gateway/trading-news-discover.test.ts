@@ -39,6 +39,8 @@ function makeRegistry(opts: { rssDiscovery?: Partial<RssDiscoveryService> | null
     rssDiscovery: opts.rssDiscovery === null ? undefined : (opts.rssDiscovery as RssDiscoveryService | undefined),
     preferenceStore: {} as any,
     watchlist: {} as any,
+    intel: {} as any,
+    binance: undefined,
     logger: noopLogger,
     tokensSnapshot: { build: () => ({ tokens: [], prices: {}, prevDayPrices: {}, maxLeverages: {} }) } as any,
     priceCache: { get: () => undefined, set: () => {} } as any,

@@ -11,7 +11,6 @@ import type {
   OrderRecord, TokenInfo,
 } from "../interfaces/trading-types.js";
 import type { ITradingSubscription } from "../interfaces/trading-client.js";
-import { fetchBinanceKlines } from "../binance-klines.js";
 import type { ITradingClient, AllDexsAssetCtxsEvent } from "../interfaces/trading-client.js";
 import type { Logger } from "pino";
 import { generateGhostCloid } from "../../helpers/cloid.js";
@@ -19,6 +18,21 @@ import { InfoCache, runWithConcurrency } from "./info-cache.js";
 
 const MAINNET_URL = "https://api.hyperliquid.xyz";
 const TESTNET_URL = "https://api.hyperliquid-testnet.xyz";
+
+class BunCompatWebSocket extends WebSocket {
+  set binaryType(value: BinaryType) {
+    super.binaryType = (value as string) === "blob" ? "arraybuffer" : value;
+  }
+  get binaryType(): BinaryType {
+    return super.binaryType;
+  }
+}
+
+/** HL k-prefix tokens (1000-unit normalized perps). Stored uppercase here;
+ *  resolveSymbol() restores the lowercase `k` prefix on hit. */
+const K_PREFIX_TOKENS = new Set([
+  "KPEPE", "KBONK", "KSHIB", "KFLOKI", "KNEIRO", "KLUNC",
+]);
 
 function mapFill(f: RawFill): Fill {
   return {
@@ -365,6 +379,8 @@ export class HyperliquidClient implements ITradingClient {
    * We filter it out and return only objects with a string name.
    */
   async listPerpDexes(force = false): Promise<PerpDexInfo[]> {
+    if (this.testnet) return [];
+
     const now = Date.now();
     if (!force && this.dexListCache !== null && now - this.dexListCacheAt < this.DEX_CACHE_TTL_MS) {
       return this.dexListCache;
@@ -517,7 +533,7 @@ export class HyperliquidClient implements ITradingClient {
 
     this.wsLifecycle = (async () => {
       if (this.wsDisposed) throw new Error("trading client disposed");
-      const transport = new WebSocketTransport({ isTestnet: this.testnet });
+      const transport = new WebSocketTransport({ isTestnet: this.testnet, reconnect: { WebSocket: BunCompatWebSocket } });
       const client = new SubscriptionClient({ transport });
       // Check disposal again after any async suspension in SDK constructors.
       if (this.wsDisposed) {
@@ -577,7 +593,11 @@ export class HyperliquidClient implements ITradingClient {
       const afterColon = name.slice(dex.length + 1);
       return `${dex.toLowerCase()}:${afterColon.toUpperCase().replace(/[-_/]?(USDT|USDC|USD|PERP)$/i, "")}`;
     }
-    return symbol.toUpperCase().replace(/[-_/]?(USDT|USDC|USD|PERP)$/i, "");
+    const upper = symbol.toUpperCase().replace(/[-_/]?(USDT|USDC|USD|PERP)$/i, "");
+    // HL k-prefix tokens (kPEPE, kBONK, ...) use a lowercase `k` by convention.
+    // Plain .toUpperCase() mangles them — caller-supplied "kPEPE" round-trips
+    // as "KPEPE" which doesn't match HL's actual asset name.
+    return K_PREFIX_TOKENS.has(upper) ? "k" + upper.slice(1) : upper;
   }
 
   async getAssetIndex(symbol: string): Promise<number> {
@@ -600,10 +620,19 @@ export class HyperliquidClient implements ITradingClient {
       balances: Array<{ coin: string; total: string; hold?: string }>;
     }
 
+    // No per-call catch on spot / abstraction RPCs: HL returns valid empty
+    // payloads ({ balances: [] }, "default") for accounts without spot or
+    // non-unified accounts, so a thrown error is genuinely transient (429,
+    // network, 5xx). Silently swallowing it used to flip a unified account
+    // to perp-only equity for that one fetch, producing the symptom
+    // "portfolio value momentarily drops then snaps back". Let the error
+    // propagate — every caller already wraps getBalance in try/catch (or
+    // Promise.allSettled) and the FE has a guard that holds prior values
+    // when a poll returns an error.
     const [perp, spot, abstraction] = await Promise.all([
       this.info("clearinghouseState", { user }) as Promise<PerpState>,
-      this.info("spotClearinghouseState", { user }).catch(() => ({ balances: [] })) as Promise<SpotState>,
-      this.info("userAbstraction", { user }).catch(() => "default") as Promise<string>,
+      this.info("spotClearinghouseState", { user }) as Promise<SpotState>,
+      this.info("userAbstraction", { user }) as Promise<string>,
     ]);
 
     const ms = perp.marginSummary;
@@ -824,9 +853,6 @@ export class HyperliquidClient implements ITradingClient {
         close: parseFloat(c.c),
         volume: parseFloat(c.v),
       }));
-    } catch (err) {
-      this.log.warn({ err, symbol: resolved }, "getKlines failed, falling back to Binance");
-      return fetchBinanceKlines(symbol, interval, limit);
     } finally {
       if (timer) clearTimeout(timer);
     }
