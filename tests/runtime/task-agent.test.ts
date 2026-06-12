@@ -45,7 +45,6 @@ function makeMinimalConfig(): Config {
     agent: {
       thinkingLevel: "low",
       thinkingBudgets: {},
-      maxToolIterations: 10,
       parallelTools: false,
       maxContextTokens: 100_000,
     },

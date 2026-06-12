@@ -107,6 +107,24 @@ describe("ContextBuilder", () => {
     expect(sp.toString()).toContain("Ghost");
   });
 
+  test("enforceCapAt protects memory and SOUL, truncating bulky skill sections first", () => {
+    const sp = new StructuredPrompt();
+    sp.add("identity", "ID");
+    sp.add("memory", "## Long-term Memory\n\nMEM_KEEP");
+    sp.add("bootstrap", "## SOUL.md\n\nSOUL_KEEP");
+    sp.add("activeSkills", "A".repeat(1000));
+    sp.add("skillsSummary", "S".repeat(1000));
+
+    sp.enforceCapAt(1600);
+
+    expect(sp.toString().length).toBeLessThanOrEqual(1600);
+    // Irreplaceable sections survive intact.
+    expect(sp.get("memory")).toContain("MEM_KEEP");
+    expect(sp.get("bootstrap")).toContain("SOUL_KEEP");
+    // The bulky, re-derivable section absorbed the truncation.
+    expect((sp.get("skillsSummary") ?? "").length).toBeLessThan(1000);
+  });
+
   test("buildFullPrompt includes runtime context and fresh memory", () => {
     const mockMemory = { getMemoryContext: () => "## Long-term Memory\n\nUser prefers dark mode." };
     const cb = new ContextBuilder({ workspaceDir, model: "test-model" }, mockMemory as never, emptySkills);

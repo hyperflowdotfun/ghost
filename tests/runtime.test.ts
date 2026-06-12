@@ -71,7 +71,6 @@ describe("createRuntime()", () => {
       expect(runtime.config.provider).toBe("openrouter");
       expect(runtime.config.model).toBe("anthropic/claude-sonnet-4");
       expect(runtime.config.autonomy.level).toBe("supervised");
-      expect(runtime.config.agent.maxToolIterations).toBe(50);
     } finally {
       runtime.db.close();
     }

@@ -760,7 +760,6 @@ export function buildAgentOptions(
     getApiKey: getApiKey(oauthManager, credentials, customModelRegistry),
     beforeToolCall: makeBeforeToolCall(
       security,
-      config.agent.maxToolIterations,
       extraReadDirs,
       approvalManager,
       eventBus,
@@ -771,7 +770,14 @@ export function buildAgentOptions(
     afterToolCall: makeAfterToolCall(leakDetector, logger),
     toolExecution: config.agent.parallelTools ? "parallel" : "sequential",
     thinkingBudgets: config.agent.thinkingBudgets,
-    transformContext: makeTransformContext(config.agent.maxContextTokens),
+    // The agent's last-resort context prune must sit at or above the memory
+    // consolidation budget; otherwise it silently drops the oldest turns
+    // BEFORE the consolidator has summarized them into MEMORY.md, so they are
+    // lost from both the live request and long-term memory. Tying the prune
+    // threshold to contextWindowTokens guarantees consolidation runs first.
+    transformContext: makeTransformContext(
+      Math.max(config.agent.maxContextTokens, config.memory.contextWindowTokens),
+    ),
   };
 }
 
@@ -976,7 +982,6 @@ function collectToolCalls(assistantMessage: object): CollectedCall[] {
 
 function makeBeforeToolCall(
   security: SecurityPolicy,
-  maxIterations: number,
   extraReadDirs: string[],
   approvalManager: ApprovalManager,
   eventBus: EventBus,
@@ -994,22 +999,7 @@ function makeBeforeToolCall(
     assistantMessage,
     toolCall,
     args,
-    context,
   }: BeforeToolCallContext): Promise<BeforeToolCallResult | undefined> => {
-    let toolCalls = 0;
-    for (let i = context.messages.length - 1; i >= 0; i--) {
-      const role = (context.messages[i] as { role: string }).role;
-      if (role === "user") break;
-      if (role === "toolResult") toolCalls++;
-    }
-    if (toolCalls >= maxIterations) {
-      logger.warn({ tool: toolCall.name, maxIterations, toolCalls }, "blocked tool: max iterations reached");
-      return {
-        block: true,
-        reason: `Maximum tool iterations (${maxIterations}) reached.`,
-      };
-    }
-
     // ----- Orchestrator-level confirm interception -----
     // bypassConfirm=true: background taskAgent — no user session to confirm
     // with. Skip entirely so background loops never deadlock waiting for a

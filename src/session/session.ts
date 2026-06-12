@@ -80,7 +80,7 @@ export class Session {
    * 1. Slice from lastConsolidated
    * 2. Take recent maxMessages
    * 3. Align to user turn (drop leading non-user messages)
-   * 4. Remove orphan tool results (unmatched toolCallId)
+   * 4. Repair tool_use / tool_result pairing so the window is API-valid
    */
   getHistory(maxMessages = 500): Message[] {
     const unconsolidated = this.messages.slice(this.lastConsolidated);
@@ -89,8 +89,8 @@ export class Session {
     // Align to user turn: drop leading non-user messages
     const userAligned = dropLeadingNonUser(recent);
 
-    // Remove orphan tool results
-    return removeOrphanToolResults(userAligned);
+    // Repair tool_use / tool_result pairing
+    return sanitizeToolPairing(userAligned);
   }
 
   /** Reset session to initial state. */
@@ -109,38 +109,92 @@ function dropLeadingNonUser(messages: Message[]): Message[] {
 }
 
 /**
- * Remove tool result messages whose toolCallId doesn't match any
- * assistant message's ToolCall.id in the current window.
+ * Repair tool_use / tool_result pairing so the window satisfies the LLM API
+ * contract: every assistant `tool_use` must be answered by a `tool_result` in
+ * the immediately following run of toolResult messages, and every
+ * `tool_result` must answer a `tool_use` in the assistant right before it.
  *
- * Scans forward: tracks declared tool call IDs from assistant messages.
- * If a toolResult references an ID not declared by any preceding assistant
- * message in this window, it's an orphan and gets dropped.
+ * Walks the window keeping only fully-paired, adjacent groups:
+ * - Unanswered tool_use blocks are stripped from the assistant message (its
+ *   text is preserved; the message is dropped only if nothing remains).
+ * - tool_result messages that don't answer the immediately-preceding
+ *   assistant — orphans, or any toolResult not directly after an assistant —
+ *   are dropped.
+ *
+ * This self-heals histories left malformed by aborted turns, context pruning,
+ * or consolidation that split a tool_use/tool_result pair — the shapes that
+ * otherwise make the provider reject the whole request (HTTP 400).
  */
-function removeOrphanToolResults(messages: Message[]): Message[] {
-  const declaredIds = new Set<string>();
-  const result: Message[] = [];
+function sanitizeToolPairing(messages: Message[]): Message[] {
+  const out: Message[] = [];
+  let i = 0;
 
-  for (const msg of messages) {
+  while (i < messages.length) {
+    const msg = messages[i];
+
     if (msg.role === "assistant") {
-      // Collect tool call IDs declared by this assistant message
-      for (const part of (msg as AssistantMessage).content) {
-        if (isToolCall(part)) {
-          declaredIds.add(part.id);
-        }
+      const useIds = toolUseIds(msg as AssistantMessage);
+      if (useIds.size === 0) {
+        out.push(msg);
+        i += 1;
+        continue;
       }
-      result.push(msg);
+
+      // Gather the run of tool results that immediately follows this assistant.
+      let j = i + 1;
+      const run: ToolResultMessage[] = [];
+      while (j < messages.length && messages[j].role === "toolResult") {
+        run.push(messages[j] as ToolResultMessage);
+        j += 1;
+      }
+      const resultIds = new Set(run.map((r) => r.toolCallId));
+
+      // Keep only tool_use blocks that have a matching result in the run.
+      const keptUseIds = new Set([...useIds].filter((id) => resultIds.has(id)));
+      const trimmed = trimAssistantToolCalls(msg as AssistantMessage, keptUseIds);
+      if (trimmed) out.push(trimmed);
+      for (const r of run) {
+        if (keptUseIds.has(r.toolCallId)) out.push(r);
+      }
+
+      i = j; // skip the consumed result run (any unmatched results are dropped)
     } else if (msg.role === "toolResult") {
-      const toolResult = msg as ToolResultMessage;
-      if (declaredIds.has(toolResult.toolCallId)) {
-        result.push(msg);
-      }
-      // else: orphan — skip it
+      // A tool result not directly after its assistant tool_use — orphan, drop.
+      i += 1;
     } else {
-      result.push(msg);
+      out.push(msg);
+      i += 1;
     }
   }
 
-  return result;
+  return out;
+}
+
+/** Collect the ids of every `tool_use` block declared by an assistant message. */
+function toolUseIds(msg: AssistantMessage): Set<string> {
+  const ids = new Set<string>();
+  if (!Array.isArray(msg.content)) return ids;
+  for (const part of msg.content) {
+    if (isToolCall(part)) ids.add(part.id);
+  }
+  return ids;
+}
+
+/**
+ * Return the assistant message with only the kept tool_use blocks (all
+ * non-toolCall content is preserved). Returns null when nothing remains — e.g.
+ * an assistant whose sole content was an unanswered tool_use.
+ */
+function trimAssistantToolCalls(
+  msg: AssistantMessage,
+  keptUseIds: Set<string>,
+): AssistantMessage | null {
+  if (!Array.isArray(msg.content)) return msg;
+  const content = msg.content.filter(
+    (part) => !isToolCall(part) || keptUseIds.has((part as ToolCall).id),
+  );
+  if (content.length === 0) return null;
+  return { ...msg, content };
 }
 
 function isToolCall(part: unknown): part is ToolCall {

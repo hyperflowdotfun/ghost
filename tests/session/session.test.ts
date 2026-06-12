@@ -175,6 +175,67 @@ describe("Session", () => {
       const history = s.getHistory();
       expect(history).toHaveLength(5);
     });
+
+    // --- tool_use/tool_result pairing repair (HTTP 400 dangling-pair guard) ---
+
+    test("strips an unanswered tool_use but keeps the assistant text", () => {
+      const s = new Session({ key: "test" });
+      s.addMessage(userMsg("go"));
+      // tool_use never answered (turn aborted before the result was persisted)
+      s.addMessage(assistantMsg("let me check", [toolCall("tc-x", "shell")]));
+      s.addMessage(userMsg("still there?"));
+      const history = s.getHistory();
+      // No toolResult, and the dangling tool_use block must be gone.
+      expect(history.some((m) => m.role === "toolResult")).toBe(false);
+      const assistant = history.find((m) => m.role === "assistant") as AssistantMessage;
+      expect(assistant.content.some((p) => (p as ToolCall).type === "toolCall")).toBe(false);
+      expect(assistant.content.some((p) => (p as TextContent).type === "text")).toBe(true);
+    });
+
+    test("drops an assistant whose only content was an unanswered tool_use", () => {
+      const s = new Session({ key: "test" });
+      s.addMessage(userMsg("go"));
+      // assistant with NO text, just the unanswered tool call
+      s.addMessage({ ...assistantMsg(""), content: [toolCall("tc-x", "shell")] });
+      s.addMessage(userMsg("ping"));
+      const history = s.getHistory();
+      expect(history.every((m) => m.role === "user")).toBe(true);
+      expect(history.some((m) => m.role === "toolResult")).toBe(false);
+    });
+
+    test("drops a tool_result orphaned by an intervening assistant (adjacency)", () => {
+      const s = new Session({ key: "test" });
+      // assistant(X) is never answered before assistant(Y) appears; results
+      // arrive afterwards. Replaying this verbatim is the HTTP 400 shape:
+      // tool_result X's previous message would be assistant(Y), not assistant(X).
+      s.addMessage(userMsg("go"));
+      s.addMessage(assistantMsg("a", [toolCall("tc-x", "shell")]));
+      s.addMessage(assistantMsg("b", [toolCall("tc-y", "file_read")]));
+      s.addMessage(toolResult("tc-x", "shell", "x out"));
+      s.addMessage(toolResult("tc-y", "file_read", "y out"));
+      const history = s.getHistory();
+      // Only the adjacent, fully-paired group survives: assistant(Y) + result Y.
+      const results = history.filter((m) => m.role === "toolResult") as ToolResultMessage[];
+      expect(results.map((r) => r.toolCallId)).toEqual(["tc-y"]);
+      // Every surviving tool_result is immediately preceded by an assistant that declares it.
+      for (let i = 0; i < history.length; i++) {
+        if (history[i].role !== "toolResult") continue;
+        const prev = history[i - 1] as AssistantMessage | undefined;
+        const id = (history[i] as ToolResultMessage).toolCallId;
+        expect(prev?.role).toBe("assistant");
+        expect(prev!.content.some((p) => (p as ToolCall).type === "toolCall" && (p as ToolCall).id === id)).toBe(true);
+      }
+    });
+
+    test("drops a tool_result not directly following its assistant", () => {
+      const s = new Session({ key: "test" });
+      s.addMessage(userMsg("go"));
+      s.addMessage(assistantMsg("plain reply"));
+      s.addMessage(toolResult("tc-z", "shell", "stray"));
+      s.addMessage(assistantMsg("more"));
+      const history = s.getHistory();
+      expect(history.some((m) => m.role === "toolResult")).toBe(false);
+    });
   });
 
   describe("clear()", () => {

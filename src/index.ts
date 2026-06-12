@@ -33,6 +33,7 @@ const { values, positionals } = parseArgs({
     lines: { type: "string", short: "n" },
     plain: { type: "boolean" },
     "no-color": { type: "boolean" },
+    yes: { type: "boolean", short: "y" },
   },
   allowPositionals: true,
   strict: false,
@@ -139,6 +140,13 @@ try {
       await runProactive(action as "on" | "off" | "status", {
         configPath: stringOpt(values.config),
         logger: rootLogger,
+      });
+      process.exit(0);
+    }
+    case "service": {
+      const { runServiceCli } = await import("./commands/service/index.js");
+      await runServiceCli(positionals[1], {
+        yes: Boolean(values.yes),
       });
       process.exit(0);
     }
@@ -456,5 +464,8 @@ Usage:
                                   Approve a pairing request (interactive picker if no code)
   ghost channel status            Show active channel state
   ghost proactive on|off|status   Enable/disable proactive advisor (restart required)
+  ghost service register          Register the OS auto-start service (replaces any existing)
+  ghost service unregister        Remove the OS service only (keeps ~/.ghost)
+  ghost service unregister --yes  Skip the confirm prompt (scripts/CI)
   `.trim());
 }
