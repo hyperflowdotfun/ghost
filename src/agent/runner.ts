@@ -30,6 +30,15 @@ import { MAIN_SESSION_KEY } from "../session/session.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import { isOriginAware } from "../tools/context-aware.js";
 
+/**
+ * Default ceiling for a single taskAgent run. Without it, a stalled LLM
+ * stream or a tool that never returns would hang `agent.prompt` forever and,
+ * because the Runner serializes on one mutex, freeze every later background
+ * call (consolidation, news summarize, cron delivery) behind it. Generous
+ * enough never to clip a legitimate multi-tool run.
+ */
+const RUNNER_CALL_TIMEOUT_MS = 180_000;
+
 export interface RunnerCallOpts {
   systemPrompt: string;
   message: string;
@@ -40,6 +49,8 @@ export interface RunnerCallOpts {
    * appears in the user's main chat history.
    */
   persist?: boolean;
+  /** Override the per-call timeout. Defaults to RUNNER_CALL_TIMEOUT_MS. */
+  timeoutMs?: number;
 }
 
 interface ContentBlock {
@@ -90,7 +101,7 @@ export class Runner {
       this.agent.state.systemPrompt = opts.systemPrompt;
       this.agent.state.messages = [];
 
-      await this.agent.prompt(opts.message);
+      await this.runPromptWithTimeout(opts.message, opts.timeoutMs ?? RUNNER_CALL_TIMEOUT_MS);
 
       const finalText = extractFinalAssistantText(this.agent.state.messages);
 
@@ -128,6 +139,31 @@ export class Runner {
     // Anchor chain on success or failure — subsequent calls still queue.
     this.inFlight = next.catch(() => undefined);
     return next;
+  }
+
+  /**
+   * Run `agent.prompt` with a hard ceiling. On timeout, abort the agent so
+   * the loop unwinds and the mutex is freed, then reject. The next queued
+   * call resets `state.messages`/`state.systemPrompt`, so an aborted run
+   * leaves no dirty state behind.
+   */
+  private async runPromptWithTimeout(message: string, timeoutMs: number): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        this.agent.abort();
+        reject(new Error(`runner: agent run exceeded ${timeoutMs}ms`));
+      }, timeoutMs);
+    });
+    const run = this.agent.prompt(message);
+    // On timeout `run` is abandoned but still settles later (abort rejects the
+    // stream). Swallow that so it never surfaces as a fatal unhandled rejection.
+    void run.catch(() => undefined);
+    try {
+      await Promise.race([run, timeout]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 }
 

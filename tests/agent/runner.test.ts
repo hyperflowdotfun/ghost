@@ -380,3 +380,54 @@ describe("Runner — tool snapshot refresh", () => {
     expect(setOriginCalls[0]).toEqual(["", ""]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Call timeout — a hung agent.prompt must not freeze the mutex forever
+// ---------------------------------------------------------------------------
+
+describe("Runner — call timeout", () => {
+  test("rejects on timeout, aborts the agent, and frees the mutex for the next call", async () => {
+    let abortCalled = false;
+    const state = {
+      systemPrompt: "",
+      messages: [] as Array<{ role: string; content: Array<{ type: string; text: string }> }>,
+      tools: [] as unknown[],
+    };
+    let hangs = true;
+    const promptFn = mock(async (message: string) => {
+      if (hangs) {
+        // Resolve only when aborted — mirrors a stalled stream / stuck tool.
+        await new Promise<void>((resolve) => {
+          const check = setInterval(() => {
+            if (abortCalled) {
+              clearInterval(check);
+              resolve();
+            }
+          }, 1);
+        });
+        return;
+      }
+      state.messages.push({
+        role: "assistant",
+        content: [{ type: "text", text: `reply-to: ${message}` }],
+      });
+    });
+    const abort = mock(() => {
+      abortCalled = true;
+    });
+    const agent = { state, prompt: promptFn, abort } as unknown as Agent;
+    const sm = createMockSessionManager();
+    const runner = new Runner(agent, sm as never, STUB_REGISTRY, NOOP_LOGGER);
+
+    // First call hangs; a short override timeout forces the watchdog to fire.
+    await expect(
+      runner.call({ systemPrompt: "SP", message: "hang", timeoutMs: 30 }),
+    ).rejects.toThrow(/exceeded/);
+    expect(abort).toHaveBeenCalledTimes(1);
+
+    // Mutex must be free: a subsequent normal call still runs.
+    hangs = false;
+    const result = await runner.call({ systemPrompt: "SP", message: "next" });
+    expect(result).toBe("reply-to: next");
+  });
+});

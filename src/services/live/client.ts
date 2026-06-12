@@ -19,6 +19,15 @@ import { InfoCache, runWithConcurrency } from "./info-cache.js";
 const MAINNET_URL = "https://api.hyperliquid.xyz";
 const TESTNET_URL = "https://api.hyperliquid-testnet.xyz";
 
+/**
+ * Per-request ceiling for /info reads. Bun/Node `fetch` has no default
+ * timeout, so a wedged socket would otherwise hang the await forever — and
+ * because every read RPC (positions, balance, meta, …) flows through here,
+ * one stuck call holds the orchestrator's session lock and freezes all chat.
+ * Matches the 10s guard `klines` already applies via Promise.race.
+ */
+const INFO_REQUEST_TIMEOUT_MS = 10_000;
+
 class BunCompatWebSocket extends WebSocket {
   set binaryType(value: BinaryType) {
     super.binaryType = (value as string) === "blob" ? "arraybuffer" : value;
@@ -345,6 +354,8 @@ export class HyperliquidClient implements ITradingClient {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ type, ...extra }),
+      // Fresh signal per attempt — each recursive retry below gets its own budget.
+      signal: AbortSignal.timeout(INFO_REQUEST_TIMEOUT_MS),
     });
 
     if (res.status === 429 && attempt < 3) {

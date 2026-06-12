@@ -6,7 +6,14 @@ import { sanitizeForPrompt } from "../helpers/sanitize-prompt.js";
 
 const BOOTSTRAP_FILES = ["SOUL.md"];
 const MAX_FILE_CHARS = 20_000;
-const TOTAL_CONTEXT_CAP = 50_000;
+/**
+ * System-prompt char ceiling. ≈30K tokens — leaves the bulk of the model's
+ * 200K window for message history. The old 50K cap was so tight that the
+ * always-on skill bodies (~36K chars) alone forced long-term memory to be
+ * truncated out of every prompt; 120K fits identity + safety + tooling +
+ * SOUL + memory + skills with headroom so nothing is sacrificed in practice.
+ */
+const TOTAL_CONTEXT_CAP = 120_000;
 
 const SECTION_SEPARATOR = "\n\n---\n\n";
 
@@ -26,6 +33,14 @@ export type PromptSectionKey =
   | "activeSkills"
   | "skillsSummary"
   | "runtimeContext";
+
+/**
+ * Order in which sections are truncated when the prompt exceeds the cap.
+ * Bulky, re-derivable sections go first (skill bodies can be re-read on demand
+ * via the skills summary's <location> path); the irreplaceable ones — memory
+ * (the trader's persisted facts) and the SOUL persona — are protected last.
+ */
+const TRUNCATION_ORDER: PromptSectionKey[] = ["skillsSummary", "activeSkills", "bootstrap", "memory"];
 
 /**
  * Structured prompt — key-based section management.
@@ -74,18 +89,14 @@ export class StructuredPrompt {
 
   /**
    * Enforce total context cap by truncating expendable sections.
-   * Truncation order: memory first, then bootstrap.
-   * Uses Math.max(0, ...) to prevent negative arithmetic.
+   * Truncates in TRUNCATION_ORDER (bulky/re-derivable first), stopping as soon
+   * as the prompt fits — so memory and SOUL are sacrificed only as a last
+   * resort. Uses Math.max(0, ...) to prevent negative arithmetic.
    */
   enforceCapAt(cap: number): void {
-    if (this.toString().length <= cap) return;
-
-    // Truncate memory first (most expendable)
-    this.truncateSection("memory", cap);
-
-    // If still over, truncate bootstrap
-    if (this.toString().length > cap) {
-      this.truncateSection("bootstrap", cap);
+    for (const key of TRUNCATION_ORDER) {
+      if (this.toString().length <= cap) return;
+      this.truncateSection(key, cap);
     }
   }
 

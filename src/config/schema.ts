@@ -42,7 +42,6 @@ export const securitySchema = z.object({
 });
 
 export const agentSchema = z.object({
-  maxToolIterations: z.coerce.number().int().positive().default(50),
   maxContextTokens: z.coerce.number().int().positive().default(32000),
   maxHistoryMessages: z.coerce.number().default(50),
   parallelTools: z.boolean().default(false),

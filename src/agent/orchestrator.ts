@@ -18,6 +18,15 @@ import { TextAccumulator } from "./text-accumulator.js";
 import { AsyncKeyLock } from "../helpers/async-lock.js";
 import type { Logger } from "pino";
 
+/**
+ * Absolute ceiling for a single chat run while the session lock is held.
+ * Set well above any realistic interactive turn (many tool iterations) so it
+ * only ever fires on a genuine stall, never on legitimate work. Kept above
+ * Runner's RUNNER_CALL_TIMEOUT_MS so that pre-prompt consolidation (which runs
+ * through the Runner inside this locked region) hits its own timeout first.
+ */
+const PROMPT_WATCHDOG_MS = 240_000;
+
 export interface PromptToolCall {
   name: string;
   arguments: unknown;
@@ -182,9 +191,27 @@ export class Orchestrator {
     // Add user message to session immediately for crash-safe persistence
     session.addMessage({ role: "user", content, timestamp: Date.now() } as Message);
 
+    // Last-resort watchdog: the session lock is held for this whole run, so a
+    // never-settling await (a stalled LLM stream, a tool that ignores abort)
+    // would wedge every later chat behind it. On timeout, abort the agent and
+    // throw so the lock is always released. Tool-level (10s HL fetch) and
+    // Runner-level timeouts are the primary guards; this is the backstop.
+    let watchdog: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      watchdog = setTimeout(() => {
+        this.agent.abort();
+        reject(new Error(`prompt run exceeded ${PROMPT_WATCHDOG_MS}ms`));
+      }, PROMPT_WATCHDOG_MS);
+    });
+    const run = this.agent.prompt(content);
+    // If the watchdog wins the race, `run` is abandoned but still settles
+    // later (abort makes the stream reject). Swallow that so it never surfaces
+    // as a fatal unhandled rejection; the race already carries the outcome.
+    void run.catch(() => undefined);
     try {
-      await this.agent.prompt(content);
+      await Promise.race([run, timeout]);
     } finally {
+      if (watchdog) clearTimeout(watchdog);
       unsubscribe();
       this.currentOrigin = null;
     }
